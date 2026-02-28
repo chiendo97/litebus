@@ -1,38 +1,31 @@
 import inspect
 from collections.abc import Callable
-from typing import Any, final
-
-_MISSING = object()
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from typing import final
 
 
 @final
 class Provide:
     """Wraps a callable as a dependency provider."""
 
-    dependency: Callable[..., Any]
-    use_cache: bool
-    _value: object
+    dependency: Callable
+    _exit_stack: AsyncExitStack
 
-    def __init__(
-        self,
-        dependency: Callable[..., Any],
-        *,
-        use_cache: bool = False,
-    ) -> None:
+    def __init__(self, dependency: Callable) -> None:
         self.dependency = dependency
-        self.use_cache = use_cache
-        self._value = _MISSING
+        self._exit_stack = AsyncExitStack()
 
-    async def __call__(self, **kwargs: Any) -> Any:
-        if self.use_cache and self._value is not _MISSING:
-            return self._value
-
+    async def __call__(self, **kwargs):
+        if inspect.isasyncgenfunction(self.dependency):
+            cm = asynccontextmanager(self.dependency)(**kwargs)
+            return await self._exit_stack.enter_async_context(cm)
+        if inspect.isgeneratorfunction(self.dependency):
+            cm = contextmanager(self.dependency)(**kwargs)
+            return self._exit_stack.enter_context(cm)
         if inspect.iscoroutinefunction(self.dependency):
-            value = await self.dependency(**kwargs)
-        else:
-            value = self.dependency(**kwargs)
+            return await self.dependency(**kwargs)
+        return self.dependency(**kwargs)
 
-        if self.use_cache:
-            self._value = value
-
-        return value
+    async def aclose(self) -> None:
+        """Clean up all active context managers."""
+        await self._exit_stack.aclose()

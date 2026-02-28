@@ -46,8 +46,9 @@ class Logger:
         print(f"  [LOG] {msg}")
 
 
-async def get_db() -> Database:
-    return Database()
+async def get_db():
+    db = Database()
+    yield db
 
 
 def get_logger() -> Logger:
@@ -101,6 +102,11 @@ async def on_order(event: OrderPlaced, logger: Logger, bus: EventBus) -> None:
 @listener(OrderProcessed)
 async def on_order_processed(event: OrderProcessed, logger: Logger) -> None:
     logger.info(f"order processed: {event.item} x{event.qty} [{event.status}]")
+
+
+@listener(Event)
+async def on_error(event: Event, logger: Logger) -> None:
+    logger.info(f"error handling event: {event}")
 
 
 # --- run ---

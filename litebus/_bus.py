@@ -146,6 +146,9 @@ class EventBus:
             _ = await self._tg.__aexit__(exc_type, exc_val, exc_tb)
         self._tg = None
 
+        for provider in self._dependencies.values():
+            await provider.aclose()
+
     # -- public API --
 
     def emit(self, event: Event) -> None:

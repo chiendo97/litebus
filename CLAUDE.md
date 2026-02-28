@@ -44,5 +44,4 @@ Three modules under `litebus/`, all re-exported from `__init__.py`:
 - Ruff with `select = ["ALL"]` minus documented exclusions
 - Black + isort for formatting
 - Use `@final` on all concrete classes
-- Use `__slots__` on all classes
 - Use `Annotated` pattern for typed CLI options (per user preference)
