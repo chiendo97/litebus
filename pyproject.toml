@@ -9,7 +9,14 @@ requires-python = ">=3.12"
 dependencies = ["anyio>=4"]
 
 [dependency-groups]
-dev = ["black>=25.9.0", "basedpyright>=1.29", "isort>=7.0.0", "ruff>=0.11"]
+dev = [
+    "black>=25.9.0",
+    "basedpyright>=1.29",
+    "isort>=7.0.0",
+    "pytest>=8",
+    "pytest-benchmark>=5",
+    "ruff>=0.11",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -32,6 +39,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "example.py" = ["INP001", "S101", "G004"]
+"benchmark.py" = ["INP001", "S101", "G004", "ARG001", "E501"]
 
 [tool.basedpyright]
 typeCheckingMode = "all"
