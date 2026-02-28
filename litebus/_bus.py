@@ -53,6 +53,13 @@ class EventBus:
         for lst in listeners or []:
             for event_type in lst.event_types:
                 self._listeners[event_type].add(lst)
+                logger.debug("Registered listener %s for %s", lst, event_type.__name__)
+
+        logger.debug(
+            "EventBus initialized with %d listener(s) and %d dependency(ies)",
+            sum(len(v) for v in self._listeners.values()),
+            len(self._dependencies),
+        )
 
     # -- dependency resolution --
 
@@ -84,7 +91,10 @@ class EventBus:
             if param_name in self._dependencies:
                 sub_kwargs[param_name] = await self._resolve(param_name, resolving)
 
-        return await provider(**sub_kwargs)
+        logger.debug("Resolving dependency %r (chain: %s)", name, " -> ".join(resolving))
+        result = await provider(**sub_kwargs)
+        logger.debug("Resolved dependency %r -> %r", name, type(result).__name__)
+        return result
 
     async def _build_kwargs(
         self,
@@ -109,6 +119,11 @@ class EventBus:
             elif name in self._dependencies:
                 kwargs[name] = await self._resolve(name)
 
+        logger.debug(
+            "Built kwargs for %s: %s",
+            getattr(fn, "__name__", fn),
+            list(kwargs.keys()),
+        )
         return kwargs
 
     # -- listener execution --
@@ -121,8 +136,19 @@ class EventBus:
         try:
             if lst.fn is None:
                 return
+            logger.debug(
+                "Calling listener %s for %s",
+                getattr(lst.fn, "__name__", lst.fn),
+                type(event).__name__,
+            )
             kwargs = await self._build_kwargs(lst.fn, event)
-            await lst.fn(**kwargs)
+            executor = lst.executor or lst.fn
+            await executor(**kwargs)
+            logger.debug(
+                "Listener %s completed for %s",
+                getattr(lst.fn, "__name__", lst.fn),
+                type(event).__name__,
+            )
         except Exception:
             logger.exception(
                 "Error in listener %s",
@@ -132,8 +158,10 @@ class EventBus:
     # -- context manager --
 
     async def __aenter__(self) -> Self:
+        logger.debug("EventBus starting")
         self._tg = anyio.create_task_group()
         _ = await self._tg.__aenter__()
+        logger.debug("EventBus started")
         return self
 
     async def __aexit__(
@@ -142,12 +170,14 @@ class EventBus:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
+        logger.debug("EventBus shutting down")
         if self._tg:
             _ = await self._tg.__aexit__(exc_type, exc_val, exc_tb)
         self._tg = None
 
         for provider in self._dependencies.values():
             await provider.aclose()
+        logger.debug("EventBus stopped")
 
     # -- public API --
 
@@ -163,5 +193,10 @@ class EventBus:
 
         event_type = type(event)
         if listeners := self._listeners.get(event_type):
+            logger.debug(
+                "Emitting %s to %d listener(s)", event_type.__name__, len(listeners)
+            )
             for lst in listeners:
                 self._tg.start_soon(self._call_listener, lst, event)
+        else:
+            logger.debug("Emitting %s — no listeners registered", event_type.__name__)

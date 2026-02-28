@@ -3,6 +3,7 @@ from collections.abc import Callable, Coroutine
 from typing import Self, cast, final, overload, override
 
 type AsyncFn = Callable[..., Coroutine[object, object, None]]
+type Wrapper = Callable[[Callable[..., object]], Callable[..., object]]
 
 
 @final
@@ -11,12 +12,17 @@ class EventListener[T]:
 
     event_types: tuple[type[T], ...]
     fn: AsyncFn | None
+    executor: AsyncFn | None
     __wrapped__: AsyncFn | None
 
-    def __init__(self, *event_types: type[T]) -> None:
+    def __init__(
+        self, *event_types: type[T], wrappers: list[Wrapper] | None = None
+    ) -> None:
         self.event_types = event_types
         self.fn = None
+        self.executor = None
         self.__wrapped__ = None
+        self._wrappers = tuple(wrappers or ())
 
     @overload
     def __call__(self, fn: AsyncFn, /) -> Self: ...
@@ -34,8 +40,13 @@ class EventListener[T]:
                 raise TypeError(msg)
             self.fn = fn
             self.__wrapped__ = fn
+            wrapped: Callable[..., object] = fn
+            for wrapper in self._wrappers:
+                wrapped = wrapper(wrapped)
+            self.executor = cast(AsyncFn, wrapped)
             return self
-        return self.fn(*args, **kwargs)
+        executor = self.executor or self.fn
+        return executor(*args, **kwargs)
 
     @override
     def __hash__(self) -> int:

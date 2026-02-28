@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any, final
+import functools
+import logging
+import time
+from collections.abc import Callable, Coroutine
+from typing import Any, cast, final
 
 import anyio
 
 from litebus import Event, EventBus, Provide, listener
+
+logging.basicConfig()
+logging.getLogger("litebus").setLevel(logging.DEBUG)
 
 # --- events (typed payloads) ---
 
@@ -75,6 +82,29 @@ async def get_audit(db: Database, logger: Logger) -> AuditService:
     return AuditService(db, logger)
 
 
+# --- wrappers: decorators applied around the listener at execution time ---
+# For real-world use, swap with prefect.flow / prefect.task:
+#   from prefect import flow
+#   @listener(OrderPlaced, wrappers=[flow])
+
+
+def timed(
+    fn: Callable[..., object],
+) -> Callable[..., Coroutine[object, object, None]]:
+    """Wrapper that logs execution time of an async listener."""
+
+    @functools.wraps(fn)
+    async def wrapper(*args: object, **kwargs: object) -> None:
+        start = time.perf_counter()
+        _ = await cast(Callable[..., Coroutine[object, object, None]], fn)(
+            *args, **kwargs
+        )
+        elapsed = time.perf_counter() - start
+        print(f"  [TIMER] {fn.__name__} took {elapsed:.4f}s")
+
+    return wrapper
+
+
 # --- event listeners: event param matched by type, others resolved via DI ---
 
 
@@ -93,7 +123,7 @@ async def on_audit(event: UserCreated, audit: AuditService) -> None:
     await audit.record(f"user_created: {event.name}")
 
 
-@listener(OrderPlaced)
+@listener(OrderPlaced, wrappers=[timed])
 async def on_order(event: OrderPlaced, logger: Logger, bus: EventBus) -> None:
     logger.info(f"order placed: {event.item} x{event.qty}")
     bus.emit(OrderProcessed(item=event.item, qty=event.qty, status="confirmed"))
