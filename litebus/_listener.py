@@ -9,8 +9,6 @@ type AsyncCallable = Callable[..., Coroutine]
 class EventListener[T]:
     """Decorator that marks an async callable as a typed event listener."""
 
-    __slots__ = ("__wrapped__", "event_types", "fn")
-
     event_types: tuple[type[T], ...]
     fn: AsyncCallable | None
     __wrapped__: AsyncCallable | None

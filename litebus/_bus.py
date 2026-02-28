@@ -37,8 +37,6 @@ def _is_event_param(annotation: type, event: Event) -> bool:
 class EventBus:
     """Event emitter with dependency injection for listeners."""
 
-    __slots__ = ("_dependencies", "_listeners", "_tg")
-
     _listeners: defaultdict[type, set[EventListener[Event]]]
     _dependencies: dict[str, Provide]
     _tg: anyio.abc.TaskGroup | None

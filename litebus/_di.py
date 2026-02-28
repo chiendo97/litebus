@@ -9,8 +9,6 @@ _MISSING = object()
 class Provide:
     """Wraps a callable as a dependency provider."""
 
-    __slots__ = ("_value", "dependency", "use_cache")
-
     dependency: Callable[..., Any]
     use_cache: bool
     _value: object
