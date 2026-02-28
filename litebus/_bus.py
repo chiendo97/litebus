@@ -4,7 +4,7 @@ import inspect
 import logging
 import typing
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from types import TracebackType
 from typing import Self, final
 
@@ -12,13 +12,9 @@ import anyio
 import anyio.abc
 
 from ._di import Provide
-from ._listener import EventListener
+from ._types import Event as Event, Listener
 
 logger = logging.getLogger(__name__)
-
-
-class Event:
-    """Base class that all events must extend."""
 
 
 def _is_event_param(annotation: type, event: Event) -> bool:
@@ -37,13 +33,13 @@ def _is_event_param(annotation: type, event: Event) -> bool:
 class EventBus:
     """Event emitter with dependency injection for listeners."""
 
-    _listeners: defaultdict[type, set[EventListener[Event]]]
+    _listeners: defaultdict[type, set[Listener]]
     _dependencies: dict[str, Provide]
     _tg: anyio.abc.TaskGroup | None
 
     def __init__(
         self,
-        listeners: list[EventListener[Event]] | None = None,
+        listeners: Sequence[Listener] | None = None,
         dependencies: dict[str, Provide] | None = None,
     ) -> None:
         self._listeners = defaultdict(set)
@@ -128,10 +124,10 @@ class EventBus:
 
     # -- listener execution --
 
-    async def _call_listener[T: Event](
+    async def _call_listener(
         self,
-        lst: EventListener[T],
-        event: T,
+        lst: Listener,
+        event: Event,
     ) -> None:
         try:
             if lst.fn is None:
