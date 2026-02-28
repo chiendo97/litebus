@@ -12,7 +12,8 @@ import anyio
 import anyio.abc
 
 from ._di import Provide
-from ._types import Event as Event, Listener
+from ._types import Event as Event
+from ._types import Listener
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +37,26 @@ class EventBus:
     _listeners: defaultdict[type, set[Listener]]
     _dependencies: dict[str, Provide]
     _tg: anyio.abc.TaskGroup | None
+    _limiter: anyio.CapacityLimiter | None
+    _on_listener_error: Callable[[Exception, Listener, Event], None] | None
 
     def __init__(
         self,
         listeners: Sequence[Listener] | None = None,
         dependencies: dict[str, Provide] | None = None,
+        *,
+        max_concurrency: int | None = None,
+        on_listener_error: Callable[[Exception, Listener, Event], None] | None = None,
     ) -> None:
         self._listeners = defaultdict(set)
         self._dependencies = dependencies or {}
         self._tg = None
+        self._limiter = (
+            anyio.CapacityLimiter(max_concurrency)
+            if max_concurrency is not None
+            else None
+        )
+        self._on_listener_error = on_listener_error
 
         for lst in listeners or []:
             for event_type in lst.event_types:
@@ -87,7 +99,9 @@ class EventBus:
             if param_name in self._dependencies:
                 sub_kwargs[param_name] = await self._resolve(param_name, resolving)
 
-        logger.debug("Resolving dependency %r (chain: %s)", name, " -> ".join(resolving))
+        logger.debug(
+            "Resolving dependency %r (chain: %s)", name, " -> ".join(resolving)
+        )
         result = await provider(**sub_kwargs)
         logger.debug("Resolved dependency %r -> %r", name, type(result).__name__)
         return result
@@ -132,24 +146,34 @@ class EventBus:
         try:
             if lst.fn is None:
                 return
-            logger.debug(
-                "Calling listener %s for %s",
-                getattr(lst.fn, "__name__", lst.fn),
-                type(event).__name__,
-            )
-            kwargs = await self._build_kwargs(lst.fn, event)
-            executor = lst.executor or lst.fn
-            await executor(**kwargs)
-            logger.debug(
-                "Listener %s completed for %s",
-                getattr(lst.fn, "__name__", lst.fn),
-                type(event).__name__,
-            )
-        except Exception:
+
+            if self._limiter is not None:
+                await self._limiter.acquire()
+
+            try:
+                logger.debug(
+                    "Calling listener %s for %s",
+                    getattr(lst.fn, "__name__", lst.fn),
+                    type(event).__name__,
+                )
+                kwargs = await self._build_kwargs(lst.fn, event)
+                executor = lst.executor or lst.fn
+                await executor(**kwargs)
+                logger.debug(
+                    "Listener %s completed for %s",
+                    getattr(lst.fn, "__name__", lst.fn),
+                    type(event).__name__,
+                )
+            finally:
+                if self._limiter is not None:
+                    self._limiter.release()
+        except Exception as exc:
             logger.exception(
                 "Error in listener %s",
                 getattr(lst.fn, "__name__", lst.fn),
             )
+            if self._on_listener_error is not None:
+                self._on_listener_error(exc, lst, event)
 
     # -- context manager --
 
@@ -180,6 +204,9 @@ class EventBus:
     def emit(self, event: Event) -> None:
         """Fire-and-forget: emit a typed event.
 
+        Walks the event's MRO so that listeners registered for a base class
+        (e.g. ``Event``) also receive subclass events (e.g. ``UserCreated``).
+
         Raises:
             RuntimeError: If the bus has not been started as a context manager.
         """
@@ -187,12 +214,16 @@ class EventBus:
             msg = "EventBus is not started - use 'async with bus:'"
             raise RuntimeError(msg)
 
-        event_type = type(event)
-        if listeners := self._listeners.get(event_type):
+        matched: set[Listener] = set()
+        for cls in type(event).__mro__:
+            if cls in self._listeners:
+                matched |= self._listeners[cls]
+
+        if matched:
             logger.debug(
-                "Emitting %s to %d listener(s)", event_type.__name__, len(listeners)
+                "Emitting %s to %d listener(s)", type(event).__name__, len(matched)
             )
-            for lst in listeners:
+            for lst in matched:
                 self._tg.start_soon(self._call_listener, lst, event)
         else:
-            logger.debug("Emitting %s — no listeners registered", event_type.__name__)
+            logger.debug("Emitting %s — no listeners registered", type(event).__name__)

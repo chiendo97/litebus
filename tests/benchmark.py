@@ -9,7 +9,7 @@ import anyio
 import pytest
 from pytest_benchmark.fixture import BenchmarkFixture
 
-from litebus import EventBus, Provide, listener
+from litebus import Event, EventBus, Provide, listener
 
 # ---------------------------------------------------------------------------
 # Event types
@@ -17,27 +17,27 @@ from litebus import EventBus, Provide, listener
 
 
 @dataclass(frozen=True, slots=True)
-class SimpleEvent:
+class SimpleEvent(Event):
     value: int
 
 
 @dataclass(frozen=True, slots=True)
-class DIEvent:
+class DIEvent(Event):
     value: int
 
 
 @dataclass(frozen=True, slots=True)
-class CascadeA:
+class CascadeA(Event):
     depth: int
 
 
 @dataclass(frozen=True, slots=True)
-class CascadeB:
+class CascadeB(Event):
     depth: int
 
 
 @dataclass(frozen=True, slots=True)
-class FanOutEvent:
+class FanOutEvent(Event):
     value: int
 
 

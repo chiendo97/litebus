@@ -49,6 +49,16 @@ class EventListener[T]:
         return executor(*args, **kwargs)
 
     @override
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, EventListener):
+            return NotImplemented
+        other_listener = cast(EventListener[object], other)
+        return (
+            self.event_types == other_listener.event_types
+            and self.fn == other_listener.fn
+        )
+
+    @override
     def __hash__(self) -> int:
         return hash((self.event_types, self.fn))
 
