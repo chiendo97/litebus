@@ -3,11 +3,10 @@
 
 from __future__ import annotations
 
-import logging
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import final
 
-import anyio
 import pytest
 
 from litebus import Event, EventBus, EventListener, Provide, listener
@@ -198,7 +197,8 @@ class TestProvide:
     async def test_sync_factory(self) -> None:
         """Provide wrapping a sync callable returns its result."""
         provider = Provide(lambda: 42)
-        result = await provider()
+        async with AsyncExitStack() as stack:
+            result = await provider(stack)
         assert result == 42
 
     async def test_async_factory(self) -> None:
@@ -208,11 +208,12 @@ class TestProvide:
             return "hello"
 
         provider = Provide(async_factory)
-        result = await provider()
+        async with AsyncExitStack() as stack:
+            result = await provider(stack)
         assert result == "hello"
 
     async def test_sync_generator_factory(self) -> None:
-        """Provide wrapping a sync generator yields value, cleans up on aclose()."""
+        """Sync generator yields value, cleans up when exit stack closes."""
         cleanup_called = False
 
         def gen_factory():  # type: ignore[no-untyped-def]
@@ -221,15 +222,14 @@ class TestProvide:
             cleanup_called = True
 
         provider = Provide(gen_factory)
-        result = await provider()
-        assert result == 99
-        assert not cleanup_called
-
-        await provider.aclose()
+        async with AsyncExitStack() as stack:
+            result = await provider(stack)
+            assert result == 99
+            assert not cleanup_called
         assert cleanup_called
 
     async def test_async_generator_factory(self) -> None:
-        """Provide wrapping an async generator yields value, cleans up on aclose()."""
+        """Async generator yields value, cleans up when exit stack closes."""
         cleanup_called = False
 
         async def async_gen_factory():  # type: ignore[no-untyped-def]
@@ -238,11 +238,10 @@ class TestProvide:
             cleanup_called = True
 
         provider = Provide(async_gen_factory)
-        result = await provider()
-        assert result == "async_value"
-        assert not cleanup_called
-
-        await provider.aclose()
+        async with AsyncExitStack() as stack:
+            result = await provider(stack)
+            assert result == "async_value"
+            assert not cleanup_called
         assert cleanup_called
 
     async def test_sub_dependency_kwargs_passed(self) -> None:
@@ -252,25 +251,52 @@ class TestProvide:
             return f"{x}-{y}"
 
         provider = Provide(factory)
-        result = await provider(x=10, y="test")
+        async with AsyncExitStack() as stack:
+            result = await provider(stack, x=10, y="test")
         assert result == "10-test"
 
-    async def test_aclose_runs_cleanup(self) -> None:
-        """aclose() runs cleanup for generator providers."""
-        cleanup_steps: list[str] = []
+    async def test_generator_cleanup_on_success(self) -> None:
+        """Generator runs post-yield code on clean exit."""
+        lifecycle: list[str] = []
 
         def gen_factory():  # type: ignore[no-untyped-def]
-            cleanup_steps.append("entered")
-            yield "value"
-            cleanup_steps.append("cleaned")
+            lifecycle.append("entered")
+            try:
+                yield "value"
+            except Exception:
+                lifecycle.append("rollback")
+            else:
+                lifecycle.append("commit")
+            finally:
+                lifecycle.append("closed")
 
         provider = Provide(gen_factory)
-        result = await provider()
-        assert result == "value"
-        assert cleanup_steps == ["entered"]
+        async with AsyncExitStack() as stack:
+            result = await provider(stack)
+            assert result == "value"
+        assert lifecycle == ["entered", "commit", "closed"]
 
-        await provider.aclose()
-        assert cleanup_steps == ["entered", "cleaned"]
+    async def test_generator_cleanup_on_error(self) -> None:
+        """Generator sees exception, rolls back, and re-raises."""
+        lifecycle: list[str] = []
+
+        def gen_factory():  # type: ignore[no-untyped-def]
+            lifecycle.append("entered")
+            try:
+                yield "value"
+            except Exception:
+                lifecycle.append("rollback")
+                raise
+            finally:
+                lifecycle.append("closed")
+
+        provider = Provide(gen_factory)
+        with pytest.raises(RuntimeError, match="boom"):
+            async with AsyncExitStack() as stack:
+                _ = await provider(stack)
+                msg = "boom"
+                raise RuntimeError(msg)
+        assert lifecycle == ["entered", "rollback", "closed"]
 
     async def test_multiple_calls_to_sync_factory(self) -> None:
         """Provide calls factory each time it is invoked."""
@@ -282,8 +308,9 @@ class TestProvide:
             return call_count
 
         provider = Provide(factory)
-        r1 = await provider()
-        r2 = await provider()
+        async with AsyncExitStack() as stack:
+            r1 = await provider(stack)
+            r2 = await provider(stack)
         assert r1 == 1
         assert r2 == 2
         assert call_count == 2
@@ -417,11 +444,9 @@ class TestEventBus:
                 "b": Provide(factory_b),
             },
         )
-        # The circular dependency error will be caught by the bus's exception handler.
-        # We need to verify it's logged. Let's use a direct _resolve call instead.
-        async with bus:
+        async with bus, AsyncExitStack() as stack:
             with pytest.raises(RuntimeError, match="Circular dependency"):
-                await bus._resolve("a")
+                await bus._resolve("a", stack)
 
     async def test_eventbus_injection(self) -> None:
         """Listener with bus: EventBus parameter receives the bus instance."""
@@ -498,32 +523,22 @@ class TestEventBus:
         # After __aexit__, generator cleanup should have run
         assert cleanup_called
 
-    async def test_listener_exception_does_not_crash_bus(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        """Exception in listener is caught and logged, does NOT crash the bus."""
-        other_received: list[AlphaEvent] = []
+    async def test_listener_exception_propagates(self) -> None:
+        """Exception in listener propagates as ExceptionGroup."""
 
         @listener(ErrorEvent)
         async def on_error(event: ErrorEvent) -> None:
             msg = "intentional test error"
             raise ValueError(msg)
 
-        @listener(AlphaEvent)
-        async def on_alpha(event: AlphaEvent) -> None:
-            other_received.append(event)
-
-        bus = EventBus(listeners=[on_error, on_alpha])
-        with caplog.at_level(logging.ERROR, logger="litebus._bus"):
+        bus = EventBus(listeners=[on_error])
+        with pytest.raises(BaseExceptionGroup) as exc_info:
             async with bus:
                 bus.emit(ErrorEvent())
-                bus.emit(AlphaEvent(value=99))
 
-        # The bus should not crash; the alpha listener should still fire
-        assert len(other_received) == 1
-        assert other_received[0].value == 99
-        # The error should be logged
-        assert "intentional test error" in caplog.text
+        assert len(exc_info.value.exceptions) == 1
+        assert isinstance(exc_info.value.exceptions[0], ValueError)
+        assert str(exc_info.value.exceptions[0]) == "intentional test error"
 
     async def test_event_with_no_listeners(self) -> None:
         """Event with no listeners: no error, just a no-op."""
@@ -579,22 +594,35 @@ class TestEventBus:
         assert len(received) == 1
         assert isinstance(received[0], AlphaEvent)
 
-    async def test_on_listener_error_callback(self) -> None:
-        """on_listener_error callback is invoked when a listener raises."""
-        errors: list[tuple[Exception, Event]] = []
+    async def test_generator_provider_rollback_on_listener_error(self) -> None:
+        """Generator-based DI provider sees exception and can rollback."""
+        lifecycle: list[str] = []
 
-        def error_handler(exc: Exception, _lst: object, event: Event) -> None:
-            errors.append((exc, event))
+        def get_session():  # type: ignore[no-untyped-def]
+            lifecycle.append("session:open")
+            try:
+                yield "session"
+            except Exception:
+                lifecycle.append("session:rollback")
+                raise
+            else:
+                lifecycle.append("session:commit")
+            finally:
+                lifecycle.append("session:close")
 
         @listener(ErrorEvent)
-        async def on_error(event: ErrorEvent) -> None:
-            msg = "boom"
-            raise ValueError(msg)
+        async def on_error(event: ErrorEvent, session: str) -> None:
+            msg = "db write failed"
+            raise RuntimeError(msg)
 
-        bus = EventBus(listeners=[on_error], on_listener_error=error_handler)
-        async with bus:
-            bus.emit(ErrorEvent())
+        bus = EventBus(
+            listeners=[on_error],
+            dependencies={"session": Provide(get_session)},
+        )
+        with pytest.raises(BaseExceptionGroup):
+            async with bus:
+                bus.emit(ErrorEvent())
 
-        assert len(errors) == 1
-        assert isinstance(errors[0][0], ValueError)
-        assert isinstance(errors[0][1], ErrorEvent)
+        # Generator provider should have been cleaned up
+        assert "session:open" in lifecycle
+        assert "session:close" in lifecycle

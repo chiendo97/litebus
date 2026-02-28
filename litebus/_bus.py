@@ -5,6 +5,7 @@ import logging
 import typing
 from collections import defaultdict
 from collections.abc import Callable, Sequence
+from contextlib import AsyncExitStack
 from types import TracebackType
 from typing import Self, final
 
@@ -38,7 +39,6 @@ class EventBus:
     _dependencies: dict[str, Provide]
     _tg: anyio.abc.TaskGroup | None
     _limiter: anyio.CapacityLimiter | None
-    _on_listener_error: Callable[[Exception, Listener, Event], None] | None
 
     def __init__(
         self,
@@ -46,7 +46,6 @@ class EventBus:
         dependencies: dict[str, Provide] | None = None,
         *,
         max_concurrency: int | None = None,
-        on_listener_error: Callable[[Exception, Listener, Event], None] | None = None,
     ) -> None:
         self._listeners = defaultdict(set)
         self._dependencies = dependencies or {}
@@ -56,7 +55,6 @@ class EventBus:
             if max_concurrency is not None
             else None
         )
-        self._on_listener_error = on_listener_error
 
         for lst in listeners or []:
             for event_type in lst.event_types:
@@ -74,6 +72,7 @@ class EventBus:
     async def _resolve(
         self,
         name: str,
+        exit_stack: AsyncExitStack,
         _resolving: frozenset[str] | None = None,
     ) -> object:
         """Recursively resolve a single dependency by name.
@@ -97,12 +96,14 @@ class EventBus:
         sub_kwargs: dict[str, object] = {}
         for param_name in sig.parameters:
             if param_name in self._dependencies:
-                sub_kwargs[param_name] = await self._resolve(param_name, resolving)
+                sub_kwargs[param_name] = await self._resolve(
+                    param_name, exit_stack, resolving
+                )
 
         logger.debug(
             "Resolving dependency %r (chain: %s)", name, " -> ".join(resolving)
         )
-        result = await provider(**sub_kwargs)
+        result = await provider(exit_stack, **sub_kwargs)
         logger.debug("Resolved dependency %r -> %r", name, type(result).__name__)
         return result
 
@@ -110,6 +111,7 @@ class EventBus:
         self,
         fn: Callable[..., object],
         event: Event,
+        exit_stack: AsyncExitStack,
     ) -> dict[str, object]:
         """Build the full kwargs dict for a listener call.
 
@@ -127,7 +129,7 @@ class EventBus:
             elif isinstance(annotation, type) and _is_event_param(annotation, event):
                 kwargs[name] = event
             elif name in self._dependencies:
-                kwargs[name] = await self._resolve(name)
+                kwargs[name] = await self._resolve(name, exit_stack)
 
         logger.debug(
             "Built kwargs for %s: %s",
@@ -143,20 +145,20 @@ class EventBus:
         lst: Listener,
         event: Event,
     ) -> None:
+        if lst.fn is None:
+            return
+
+        if self._limiter is not None:
+            await self._limiter.acquire()
+
         try:
-            if lst.fn is None:
-                return
-
-            if self._limiter is not None:
-                await self._limiter.acquire()
-
-            try:
+            async with AsyncExitStack() as call_stack:
                 logger.debug(
                     "Calling listener %s for %s",
                     getattr(lst.fn, "__name__", lst.fn),
                     type(event).__name__,
                 )
-                kwargs = await self._build_kwargs(lst.fn, event)
+                kwargs = await self._build_kwargs(lst.fn, event, call_stack)
                 executor = lst.executor or lst.fn
                 await executor(**kwargs)
                 logger.debug(
@@ -164,19 +166,9 @@ class EventBus:
                     getattr(lst.fn, "__name__", lst.fn),
                     type(event).__name__,
                 )
-            finally:
-                if self._limiter is not None:
-                    self._limiter.release()
-        except Exception as exc:
-            logger.exception(
-                "Error in listener %s",
-                getattr(lst.fn, "__name__", lst.fn),
-            )
-            if self._on_listener_error is not None:
-                try:
-                    self._on_listener_error(exc, lst, event)
-                except Exception:
-                    logger.exception("Error in on_listener_error callback")
+        finally:
+            if self._limiter is not None:
+                self._limiter.release()
 
     # -- context manager --
 
@@ -197,9 +189,6 @@ class EventBus:
         if self._tg:
             _ = await self._tg.__aexit__(exc_type, exc_val, exc_tb)
         self._tg = None
-
-        for provider in self._dependencies.values():
-            await provider.aclose()
         logger.debug("EventBus stopped")
 
     # -- public API --
