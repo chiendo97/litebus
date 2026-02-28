@@ -1,12 +1,28 @@
-"""Usage example: event listeners with dependency injection."""
+"""Usage example: typed event listeners with dependency injection."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import anyio
 
 from litebus import EventBus, Provide, listener
+
+# --- events (typed payloads) ---
+
+
+@dataclass(frozen=True, slots=True)
+class UserCreated:
+    name: str
+    email: str
+
+
+@dataclass(frozen=True, slots=True)
+class OrderPlaced:
+    item: str
+    qty: int
+
 
 # --- services (the things we inject) ---
 
@@ -40,36 +56,36 @@ class AuditService:
         self.db = db
         self.logger = logger
 
-    async def record(self, action: str, data: dict[str, Any]) -> None:
+    async def record(self, action: str) -> None:
         self.logger.info(f"audit: {action}")
-        await self.db.save({"audit": action, **data})
+        await self.db.save({"audit": action})
 
 
 async def get_audit(db: Database, logger: Logger) -> AuditService:
     return AuditService(db, logger)
 
 
-# --- event listeners: parameters are resolved via DI or emit kwargs ---
+# --- event listeners: event param matched by type, others resolved via DI ---
 
 
-@listener("user_created")
+@listener(UserCreated)
 async def on_user_created(
-    data: dict[str, Any],
+    event: UserCreated,
     db: Database,
     logger: Logger,
 ) -> None:
-    logger.info(f"user created: {data}")
-    await db.save(data)
+    logger.info(f"user created: {event}")
+    await db.save({"name": event.name, "email": event.email})
 
 
-@listener("user_created")
-async def on_audit(data: dict[str, Any], audit: AuditService) -> None:
-    await audit.record("user_created", data)
+@listener(UserCreated)
+async def on_audit(event: UserCreated, audit: AuditService) -> None:
+    await audit.record(f"user_created: {event.name}")
 
 
-@listener("order_placed")
-def on_order(data: dict[str, Any], logger: Logger) -> None:
-    logger.info(f"order placed: {data}")
+@listener(OrderPlaced)
+async def on_order(event: OrderPlaced, logger: Logger) -> None:
+    logger.info(f"order placed: {event.item} x{event.qty}")
 
 
 # --- run ---
@@ -86,11 +102,11 @@ async def main() -> None:
     )
 
     async with bus:
-        print("--- emit user_created ---")
-        bus.emit("user_created", data={"name": "Alice", "email": "alice@example.com"})
+        print("--- emit UserCreated ---")
+        bus.emit(UserCreated(name="Alice", email="alice@example.com"))
 
-        print("--- emit order_placed ---")
-        bus.emit("order_placed", data={"item": "Widget", "qty": 3})
+        print("--- emit OrderPlaced ---")
+        bus.emit(OrderPlaced(item="Widget", qty=3))
 
         # give listeners time to run
         await anyio.sleep(0.1)
