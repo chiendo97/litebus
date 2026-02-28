@@ -38,6 +38,36 @@ Three modules under `litebus/`, all re-exported from `__init__.py`:
 
 **Dispatch flow:** `emit()` → send stream → worker → for each matching listener: resolve DI params + merge emit kwargs → call listener.
 
+## Design decisions
+
+### Wrappers: `wrappers=` parameter only, no stacked decorators
+
+`EventListener` supports wrapping the execution function (e.g. with Prefect
+`flow`/`task`) via the `wrappers` keyword argument:
+
+```python
+@listener(OrderPlaced, wrappers=[flow])
+@listener(OrderPlaced, wrappers=[lambda fn: flow(fn, name="...", log_prints=True)])
+```
+
+Stacked decorator syntax (`@listener` + `@flow` as separate decorators) was
+evaluated and intentionally **not** supported. Reasons:
+
+1. **`@flow` on outer fails** — Prefect calls `inspect.getfile(fn)` which
+   requires a real function; an `EventListener` class instance cannot satisfy this.
+2. **`@listener` on outer requires `__wrapped__` traversal** — fragile implicit
+   magic that assumes all decorators set `__wrapped__`.
+3. **Cycle risk** — when an outer decorator wraps the listener, `__call__` must
+   delegate to `self.fn` (not `self.executor`) to avoid infinite loops, which
+   changes direct-call behavior as a side effect.
+4. **Bus complexity** — requires `_unwrap_listener` to traverse `__wrapped__`
+   chains and mutate `executor`, plus weakened type signatures (`Sequence[object]`).
+5. **Minimal benefit** — saves a few characters over `wrappers=[...]` but adds
+   5 changes across 2 files for only partial support (one ordering works).
+
+The `wrappers=` parameter is explicit, keeps the bus simple, and covers all
+use cases including custom decorator parameters via lambdas.
+
 ## Conventions
 
 - Strict typing with `basedpyright` in `all` mode (see `pyproject.toml` for suppressed reports)
