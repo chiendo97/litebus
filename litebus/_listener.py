@@ -6,6 +6,16 @@ type AsyncFn = Callable[..., Coroutine[object, object, None]]
 type Wrapper = Callable[[Callable[..., object]], Callable[..., object]]
 
 
+def _find_async_fn(obj: object) -> AsyncFn | None:
+    """Traverse __wrapped__ chain to find the original async function."""
+    current: object = obj
+    while current is not None:
+        if inspect.iscoroutinefunction(current):
+            return cast(AsyncFn, current)
+        current = getattr(current, "__wrapped__", None)
+    return None
+
+
 @final
 class EventListener[T]:
     """Decorator that marks an async callable as a typed event listener."""
@@ -25,7 +35,7 @@ class EventListener[T]:
         self._wrappers = tuple(wrappers or ())
 
     @overload
-    def __call__(self, fn: AsyncFn, /) -> Self: ...
+    def __call__(self, fn: Callable[..., object], /) -> Self: ...
 
     @overload
     def __call__(self, **kwargs: object) -> Coroutine[object, object, None]: ...
@@ -34,19 +44,33 @@ class EventListener[T]:
         self, *args: object, **kwargs: object
     ) -> Self | Coroutine[object, object, None]:
         if self.fn is None:
-            fn = cast(AsyncFn, args[0])
-            if not inspect.iscoroutinefunction(fn):
-                msg = f"Event listener must be an async function, got {fn!r}"
+            target = args[0]
+            original = _find_async_fn(target)
+            if original is None:
+                msg = f"Event listener must wrap an async function, got {target!r}"
                 raise TypeError(msg)
-            self.fn = fn
-            self.__wrapped__ = fn
-            wrapped: Callable[..., object] = fn
+
+            self.fn = original
+            self.__wrapped__ = original
+
+            # Build executor: if target is already wrapped (e.g. by @flow),
+            # start the chain from it; otherwise start from the raw function.
+            wrapped: Callable[..., object] = cast(Callable[..., object], target)
             for wrapper in self._wrappers:
                 wrapped = wrapper(wrapped)
             self.executor = cast(AsyncFn, wrapped)
+
+            # Copy function metadata so outer decorators (@flow, @task) work.
+            for attr in ("__module__", "__name__", "__qualname__", "__doc__"):
+                val = getattr(original, attr, None)
+                if val is not None:
+                    object.__setattr__(self, attr, val)
             return self
-        executor = self.executor or self.fn
-        return executor(*args, **kwargs)
+
+        # Delegate to fn directly (not executor) to avoid infinite loops
+        # when an outer decorator (@flow) wraps this listener: the bus calls
+        # executor(=Flow) → Flow calls listener.__call__ → fn (no cycle).
+        return self.fn(*args, **kwargs)
 
     @override
     def __hash__(self) -> int:

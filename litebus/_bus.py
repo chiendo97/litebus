@@ -6,12 +6,13 @@ import typing
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from types import TracebackType
-from typing import Self, final
+from typing import Self, cast, final
 
 import anyio
 import anyio.abc
 
 from ._di import Provide
+from ._listener import AsyncFn, EventListener
 from ._types import Event as Event, Listener
 
 logger = logging.getLogger(__name__)
@@ -39,14 +40,15 @@ class EventBus:
 
     def __init__(
         self,
-        listeners: Sequence[Listener] | None = None,
+        listeners: Sequence[Listener | object] | None = None,
         dependencies: dict[str, Provide] | None = None,
     ) -> None:
         self._listeners = defaultdict(set)
         self._dependencies = dependencies or {}
         self._tg = None
 
-        for lst in listeners or []:
+        for obj in listeners or []:
+            lst = self._unwrap_listener(obj)
             for event_type in lst.event_types:
                 self._listeners[event_type].add(lst)
                 logger.debug("Registered listener %s for %s", lst, event_type.__name__)
@@ -56,6 +58,25 @@ class EventBus:
             sum(len(v) for v in self._listeners.values()),
             len(self._dependencies),
         )
+
+    @staticmethod
+    def _unwrap_listener(obj: object) -> Listener:
+        """Extract an EventListener from a possibly-wrapped object.
+
+        Supports both decorator orderings:
+        - ``@listener`` directly → obj is already an EventListener
+        - ``@flow`` / ``@task`` wrapping ``@listener`` → traverse ``__wrapped__``
+        """
+        if isinstance(obj, EventListener):
+            return cast(Listener, cast(object, obj))
+        current: object = getattr(obj, "__wrapped__", None)
+        while current is not None:
+            if isinstance(current, EventListener):
+                current.executor = cast(AsyncFn, obj)
+                return cast(Listener, cast(object, current))
+            current = getattr(current, "__wrapped__", None)
+        msg = f"Cannot find EventListener in {obj!r}"
+        raise TypeError(msg)
 
     # -- dependency resolution --
 
