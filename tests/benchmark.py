@@ -9,7 +9,7 @@ import anyio
 import pytest
 from pytest_benchmark.fixture import BenchmarkFixture
 
-from litebus import EventBus, Provide, listener
+from litebus import Event, EventBus, Provide, listener
 
 # ---------------------------------------------------------------------------
 # Event types
@@ -17,27 +17,27 @@ from litebus import EventBus, Provide, listener
 
 
 @dataclass(frozen=True, slots=True)
-class SimpleEvent:
+class SimpleEvent(Event):
     value: int
 
 
 @dataclass(frozen=True, slots=True)
-class DIEvent:
+class DIEvent(Event):
     value: int
 
 
 @dataclass(frozen=True, slots=True)
-class CascadeA:
+class CascadeA(Event):
     depth: int
 
 
 @dataclass(frozen=True, slots=True)
-class CascadeB:
+class CascadeB(Event):
     depth: int
 
 
 @dataclass(frozen=True, slots=True)
-class FanOutEvent:
+class FanOutEvent(Event):
     value: int
 
 
@@ -136,24 +136,6 @@ def test_di(benchmark: BenchmarkFixture) -> None:
             dependencies={
                 "a": Provide(get_service_a),
                 "b": Provide(get_service_b),
-            },
-        )
-        async with bus:
-            for i in range(N):
-                bus.emit(DIEvent(value=i))
-
-    benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
-
-
-def test_di_cached(benchmark: BenchmarkFixture) -> None:
-    """Same as DI bench but with cached providers."""
-
-    async def run() -> None:
-        bus = EventBus(
-            listeners=[on_di],
-            dependencies={
-                "a": Provide(get_service_a, use_cache=True),
-                "b": Provide(get_service_b, use_cache=True),
             },
         )
         async with bus:

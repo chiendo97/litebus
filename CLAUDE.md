@@ -24,19 +24,21 @@ uv run isort .
 uv run python example.py
 ```
 
-No test suite exists yet.
+Benchmarks live under `tests/benchmark.py` (requires `pytest-benchmark`).
 
 ## Architecture
 
-Three modules under `litebus/`, all re-exported from `__init__.py`:
+Five modules under `litebus/`, all re-exported from `__init__.py`:
 
-- **`_listener.py`** — `EventListener` (aliased as `listener`): decorator that binds a callable to one or more event IDs. Stores `event_ids: frozenset[str]` and the wrapped `fn`.
+- **`_types.py`** -- `Event` base class that all events must extend, and `Listener` protocol used internally by the bus.
 
-- **`_di.py`** — `Provide`: wraps a factory callable as a dependency provider. Supports both sync and async factories, optional caching (`use_cache=True`). Sub-dependencies of a provider are resolved by inspecting its signature parameters.
+- **`_listener.py`** -- `EventListener[T]` (aliased as `listener`): generic decorator that binds an async callable to one or more event *types*. Stores `event_types: tuple[type[T], ...]` and the wrapped `fn`. Supports optional `wrappers` applied around the listener at execution time.
 
-- **`_bus.py`** — `EventBus`: the core. Used as an async context manager (`async with bus:`). Internally creates an anyio `MemoryObjectStream` and a worker task group. `emit()` is fire-and-forget (non-async) — it pushes `(listener, kwargs)` tuples into the stream. The worker picks them up and calls each listener concurrently via the task group. Dependency resolution is recursive (`_resolve`) with circular-dependency detection.
+- **`_di.py`** -- `Provide`: wraps a factory callable as a dependency provider. Supports sync functions, async functions, sync generators, and async generators (context-managed via `AsyncExitStack`). Sub-dependencies of a provider are resolved by inspecting its signature parameters.
 
-**Dispatch flow:** `emit()` → send stream → worker → for each matching listener: resolve DI params + merge emit kwargs → call listener.
+- **`_bus.py`** -- `EventBus`: the core. Used as an async context manager (`async with bus:`). On enter it creates an anyio `TaskGroup`. `emit(event)` is fire-and-forget (non-async) -- for each listener registered to the event's type, it calls `task_group.start_soon()` to schedule the listener concurrently. Dependency resolution is recursive (`_resolve`) with circular-dependency detection. On exit, the task group awaits all spawned tasks and providers are closed.
+
+**Dispatch flow:** `emit(event)` -> for each matching listener: `task_group.start_soon(_call_listener)` -> resolve DI params via `_build_kwargs` -> call listener.
 
 ## Conventions
 
