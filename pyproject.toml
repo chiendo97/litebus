@@ -17,6 +17,7 @@ dev = [
     "pytest-benchmark>=5",
     "ruff>=0.11",
     "ipython>=9.10.0",
+    "prefect>=3.6.20",
 ]
 
 [build-system]
