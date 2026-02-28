@@ -6,7 +6,7 @@ import functools
 import logging
 import time
 from collections.abc import Callable, Coroutine
-from typing import Any, cast, final
+from typing import cast, final
 
 import anyio
 
@@ -44,7 +44,7 @@ class OrderProcessed(Event):
 
 
 class Database:
-    async def save(self, data: dict[str, Any]) -> None:
+    async def save(self, data: dict[str, object]) -> None:
         print(f"  [DB] saved: {data}")
 
 

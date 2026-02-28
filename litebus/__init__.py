@@ -1,4 +1,5 @@
-from ._bus import Event, EventBus
+from ._bus import EventBus
+from ._types import Event
 from ._di import Provide
 from ._listener import EventListener, listener
 
