@@ -1,26 +1,28 @@
+# Copyright 2026 chiendo97
+
 import inspect
 import logging
-import math
 import typing
 from collections import defaultdict
 from collections.abc import Callable
-from contextlib import AsyncExitStack
 from types import TracebackType
 from typing import Any, Self, final
 
 import anyio
-from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
+import anyio.abc
 
 from ._di import Provide
 from ._listener import EventListener
-
-type _Item = tuple[EventListener[Any], Any]
 
 logger = logging.getLogger(__name__)
 
 
 def _is_event_param(annotation: type, event: object) -> bool:
-    """Check if a parameter annotation matches the event type."""
+    """Check if a parameter annotation matches the event type.
+
+    Returns:
+        Whether the annotation matches the event type.
+    """
     try:
         return isinstance(event, annotation)
     except TypeError:
@@ -31,12 +33,11 @@ def _is_event_param(annotation: type, event: object) -> bool:
 class EventBus:
     """Event emitter with dependency injection for listeners."""
 
-    __slots__ = ("_dependencies", "_exit_stack", "_listeners", "_send_stream")
+    __slots__ = ("_dependencies", "_listeners", "_tg")
 
     _listeners: defaultdict[type, set[EventListener[Any]]]
     _dependencies: dict[str, Provide]
-    _send_stream: MemoryObjectSendStream[_Item] | None
-    _exit_stack: AsyncExitStack | None
+    _tg: anyio.abc.TaskGroup | None
 
     def __init__(
         self,
@@ -45,8 +46,7 @@ class EventBus:
     ) -> None:
         self._listeners = defaultdict(set)
         self._dependencies = dependencies or {}
-        self._send_stream = None
-        self._exit_stack = None
+        self._tg = None
 
         for lst in listeners or []:
             for event_type in lst.event_types:
@@ -59,14 +59,21 @@ class EventBus:
         name: str,
         _resolving: frozenset[str] | None = None,
     ) -> Any:
-        """Recursively resolve a single dependency by name."""
+        """Recursively resolve a single dependency by name.
+
+        Returns:
+            The resolved dependency value.
+
+        Raises:
+            RuntimeError: If a circular dependency is detected.
+        """
         resolving = _resolving or frozenset()
         if name in resolving:
             msg = f"Circular dependency: {' -> '.join(resolving)} -> {name}"
             raise RuntimeError(msg)
 
         provider = self._dependencies[name]
-        resolving = resolving | {name}
+        resolving |= {name}
 
         # resolve sub-dependencies of this provider
         sig = inspect.signature(provider.dependency)
@@ -82,14 +89,20 @@ class EventBus:
         fn: Callable[..., Any],
         event: Any,
     ) -> dict[str, Any]:
-        """Build the full kwargs dict for a listener call."""
+        """Build the full kwargs dict for a listener call.
+
+        Returns:
+            Mapping of parameter names to resolved values.
+        """
         sig = inspect.signature(fn)
         hints = typing.get_type_hints(fn)
         kwargs: dict[str, Any] = {}
 
         for name in sig.parameters:
             annotation = hints.get(name)
-            if isinstance(annotation, type) and _is_event_param(annotation, event):
+            if annotation is EventBus:
+                kwargs[name] = self
+            elif isinstance(annotation, type) and _is_event_param(annotation, event):
                 kwargs[name] = event
             elif name in self._dependencies:
                 kwargs[name] = await self._resolve(name)
@@ -114,29 +127,11 @@ class EventBus:
                 getattr(lst.fn, "__name__", lst.fn),
             )
 
-    # -- worker / stream plumbing --
-
-    async def _worker(
-        self,
-        receive_stream: MemoryObjectReceiveStream[_Item],
-    ) -> None:
-        async with receive_stream, anyio.create_task_group() as tg:
-            async for lst, event in receive_stream:
-                tg.start_soon(self._call_listener, lst, event)
+    # -- context manager --
 
     async def __aenter__(self) -> Self:
-        self._exit_stack = AsyncExitStack()
-        send_stream, receive_stream = anyio.create_memory_object_stream[_Item](
-            max_buffer_size=math.inf,  # type: ignore[arg-type]
-        )
-        self._send_stream = send_stream
-        tg = anyio.create_task_group()
-        # Exit stack LIFO ordering guarantees drain on exit:
-        #   1. send_stream closes → worker receives EndOfStream after buffer drains
-        #   2. tg closes → waits for worker (and all spawned listener tasks) to finish
-        _ = await self._exit_stack.enter_async_context(tg)
-        _ = await self._exit_stack.enter_async_context(send_stream)
-        tg.start_soon(self._worker, receive_stream)
+        self._tg = anyio.create_task_group()
+        _ = await self._tg.__aenter__()
         return self
 
     async def __aexit__(
@@ -145,20 +140,23 @@ class EventBus:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        if self._exit_stack:
-            _ = await self._exit_stack.__aexit__(exc_type, exc_val, exc_tb)
-        self._exit_stack = None
-        self._send_stream = None
+        if self._tg:
+            _ = await self._tg.__aexit__(exc_type, exc_val, exc_tb)
+        self._tg = None
 
     # -- public API --
 
     def emit(self, event: object) -> None:
-        """Fire-and-forget: emit a typed event."""
-        if not self._send_stream:
+        """Fire-and-forget: emit a typed event.
+
+        Raises:
+            RuntimeError: If the bus has not been started as a context manager.
+        """
+        if not self._tg:
             msg = "EventBus is not started - use 'async with bus:'"
             raise RuntimeError(msg)
 
         event_type = type(event)
         if listeners := self._listeners.get(event_type):
             for lst in listeners:
-                self._send_stream.send_nowait((lst, event))
+                self._tg.start_soon(self._call_listener, lst, event)

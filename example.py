@@ -24,6 +24,13 @@ class OrderPlaced:
     qty: int
 
 
+@dataclass(frozen=True, slots=True)
+class OrderProcessed:
+    item: str
+    qty: int
+    status: str
+
+
 # --- services (the things we inject) ---
 
 
@@ -84,8 +91,14 @@ async def on_audit(event: UserCreated, audit: AuditService) -> None:
 
 
 @listener(OrderPlaced)
-async def on_order(event: OrderPlaced, logger: Logger) -> None:
+async def on_order(event: OrderPlaced, logger: Logger, bus: EventBus) -> None:
     logger.info(f"order placed: {event.item} x{event.qty}")
+    bus.emit(OrderProcessed(item=event.item, qty=event.qty, status="confirmed"))
+
+
+@listener(OrderProcessed)
+async def on_order_processed(event: OrderProcessed, logger: Logger) -> None:
+    logger.info(f"order processed: {event.item} x{event.qty} [{event.status}]")
 
 
 # --- run ---
@@ -93,7 +106,7 @@ async def on_order(event: OrderPlaced, logger: Logger) -> None:
 
 async def main() -> None:
     bus = EventBus(
-        listeners=[on_user_created, on_audit, on_order],
+        listeners=[on_user_created, on_audit, on_order, on_order_processed],
         dependencies={
             "db": Provide(get_db),
             "logger": Provide(get_logger),
@@ -108,7 +121,7 @@ async def main() -> None:
         print("--- emit OrderPlaced ---")
         bus.emit(OrderPlaced(item="Widget", qty=3))
 
-    # all events are fully handled here
+    # all events are fully handled here (including cascaded OrderProcessed)
 
 
 anyio.run(main)
