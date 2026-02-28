@@ -131,6 +131,9 @@ class EventBus:
         )
         self._send_stream = send_stream
         tg = anyio.create_task_group()
+        # Exit stack LIFO ordering guarantees drain on exit:
+        #   1. send_stream closes → worker receives EndOfStream after buffer drains
+        #   2. tg closes → waits for worker (and all spawned listener tasks) to finish
         _ = await self._exit_stack.enter_async_context(tg)
         _ = await self._exit_stack.enter_async_context(send_stream)
         tg.start_soon(self._worker, receive_stream)

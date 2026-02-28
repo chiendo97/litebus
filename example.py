@@ -108,8 +108,7 @@ async def main() -> None:
         print("--- emit OrderPlaced ---")
         bus.emit(OrderPlaced(item="Widget", qty=3))
 
-        # give listeners time to run
-        await anyio.sleep(0.1)
+    # all events are fully handled here
 
 
 anyio.run(main)
