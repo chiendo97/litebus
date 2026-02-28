@@ -17,7 +17,11 @@ from ._listener import EventListener
 logger = logging.getLogger(__name__)
 
 
-def _is_event_param(annotation: type, event: object) -> bool:
+class Event:
+    """Base class that all events must extend."""
+
+
+def _is_event_param(annotation: type, event: Event) -> bool:
     """Check if a parameter annotation matches the event type.
 
     Returns:
@@ -35,13 +39,13 @@ class EventBus:
 
     __slots__ = ("_dependencies", "_listeners", "_tg")
 
-    _listeners: defaultdict[type, set[EventListener[Any]]]
+    _listeners: defaultdict[type, set[EventListener[Event]]]
     _dependencies: dict[str, Provide]
     _tg: anyio.abc.TaskGroup | None
 
     def __init__(
         self,
-        listeners: list[EventListener[Any]] | None = None,
+        listeners: list[EventListener[Event]] | None = None,
         dependencies: dict[str, Provide] | None = None,
     ) -> None:
         self._listeners = defaultdict(set)
@@ -58,7 +62,7 @@ class EventBus:
         self,
         name: str,
         _resolving: frozenset[str] | None = None,
-    ) -> Any:
+    ):
         """Recursively resolve a single dependency by name.
 
         Returns:
@@ -86,8 +90,8 @@ class EventBus:
 
     async def _build_kwargs(
         self,
-        fn: Callable[..., Any],
-        event: Any,
+        fn: Callable[..., object],
+        event: Event,
     ) -> dict[str, Any]:
         """Build the full kwargs dict for a listener call.
 
@@ -111,10 +115,10 @@ class EventBus:
 
     # -- listener execution --
 
-    async def _call_listener(
+    async def _call_listener[T: Event](
         self,
-        lst: EventListener[Any],
-        event: Any,
+        lst: EventListener[T],
+        event: T,
     ) -> None:
         try:
             if lst.fn is None:
@@ -146,7 +150,7 @@ class EventBus:
 
     # -- public API --
 
-    def emit(self, event: object) -> None:
+    def emit(self, event: Event) -> None:
         """Fire-and-forget: emit a typed event.
 
         Raises:

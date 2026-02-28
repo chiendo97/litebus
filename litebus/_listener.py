@@ -1,8 +1,8 @@
 import inspect
 from collections.abc import Callable, Coroutine
-from typing import Any, final, override
+from typing import final, override
 
-type AsyncCallable = Callable[..., Coroutine[Any, Any, Any]]
+type AsyncCallable = Callable[..., Coroutine]
 
 
 @final

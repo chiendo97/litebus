@@ -2,33 +2,35 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, final
 
 import anyio
 
-from litebus import EventBus, Provide, listener
+from litebus import Event, EventBus, Provide, listener
 
 # --- events (typed payloads) ---
 
 
-@dataclass(frozen=True, slots=True)
-class UserCreated:
-    name: str
-    email: str
+@final
+class UserCreated(Event):
+    def __init__(self, name: str, email: str) -> None:
+        self.name = name
+        self.email = email
 
 
-@dataclass(frozen=True, slots=True)
-class OrderPlaced:
-    item: str
-    qty: int
+@final
+class OrderPlaced(Event):
+    def __init__(self, item: str, qty: int) -> None:
+        self.item = item
+        self.qty = qty
 
 
-@dataclass(frozen=True, slots=True)
-class OrderProcessed:
-    item: str
-    qty: int
-    status: str
+@final
+class OrderProcessed(Event):
+    def __init__(self, item: str, qty: int, status: str) -> None:
+        self.item = item
+        self.qty = qty
+        self.status = status
 
 
 # --- services (the things we inject) ---
