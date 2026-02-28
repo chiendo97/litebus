@@ -1,0 +1,53 @@
+[project]
+name = "litebus"
+version = "0.1.0"
+description = "Standalone event bus with dependency injection"
+authors = [
+    { name = "chiendo97", email = "chiendo97@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = ["anyio>=4"]
+
+[dependency-groups]
+dev = ["black>=25.9.0", "basedpyright>=1.29", "isort>=7.0.0", "ruff>=0.11"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",       # pydocstyle — skip for POC
+    "ANN",     # flake8-annotations — basedpyright handles this
+    "COM812",  # trailing comma — conflicts with black
+    "ISC001",  # implicit string concat — conflicts with black
+    "I",       # import sorting — isort handles this
+    "TC",      # type-checking imports — not using TYPE_CHECKING blocks
+    "T20",     # print — used in example
+]
+
+[tool.ruff.lint.per-file-ignores]
+"example.py" = ["INP001", "S101", "G004"]
+
+[tool.basedpyright]
+typeCheckingMode = "all"
+
+reportAny = false
+reportExplicitAny = false
+reportMissingParameterType = false
+reportMissingTypeArgument = false
+reportUnknownArgumentType = false
+reportUnknownLambdaType = false
+reportUnknownMemberType = false
+reportUnknownParameterType = false
+reportUnknownVariableType = false
+
+[tool.isort]
+profile = "black"
+
+[tool.black]
+target-version = ["py312"]
