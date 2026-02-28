@@ -145,24 +145,6 @@ def test_di(benchmark: BenchmarkFixture) -> None:
     benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
 
 
-def test_di_cached(benchmark: BenchmarkFixture) -> None:
-    """Same as DI bench but with cached providers."""
-
-    async def run() -> None:
-        bus = EventBus(
-            listeners=[on_di],
-            dependencies={
-                "a": Provide(get_service_a, use_cache=True),
-                "b": Provide(get_service_b, use_cache=True),
-            },
-        )
-        async with bus:
-            for i in range(N):
-                bus.emit(DIEvent(value=i))
-
-    benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
-
-
 def test_fanout_10(benchmark: BenchmarkFixture) -> None:
     """Emit N events each handled by 10 listeners."""
     listeners: list[Any] = []

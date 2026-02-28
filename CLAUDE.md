@@ -34,7 +34,7 @@ Five modules under `litebus/`, all re-exported from `__init__.py`:
 
 - **`_listener.py`** -- `EventListener[T]` (aliased as `listener`): generic decorator that binds an async callable to one or more event *types*. Stores `event_types: tuple[type[T], ...]` and the wrapped `fn`. Supports optional `wrappers` applied around the listener at execution time.
 
-- **`_di.py`** -- `Provide`: wraps a factory callable as a dependency provider. Supports sync functions, async functions, sync generators, and async generators (context-managed via `AsyncExitStack`). Optional caching (`use_cache=True`) avoids re-invoking the factory after the first call. Sub-dependencies of a provider are resolved by inspecting its signature parameters.
+- **`_di.py`** -- `Provide`: wraps a factory callable as a dependency provider. Supports sync functions, async functions, sync generators, and async generators (context-managed via `AsyncExitStack`). Sub-dependencies of a provider are resolved by inspecting its signature parameters.
 
 - **`_bus.py`** -- `EventBus`: the core. Used as an async context manager (`async with bus:`). On enter it creates an anyio `TaskGroup`. `emit(event)` is fire-and-forget (non-async) -- for each listener registered to the event's type, it calls `task_group.start_soon()` to schedule the listener concurrently. Dependency resolution is recursive (`_resolve`) with circular-dependency detection. On exit, the task group awaits all spawned tasks and providers are closed.
 

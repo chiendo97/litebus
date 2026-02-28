@@ -173,7 +173,10 @@ class EventBus:
                 getattr(lst.fn, "__name__", lst.fn),
             )
             if self._on_listener_error is not None:
-                self._on_listener_error(exc, lst, event)
+                try:
+                    self._on_listener_error(exc, lst, event)
+                except Exception:
+                    logger.exception("Error in on_listener_error callback")
 
     # -- context manager --
 

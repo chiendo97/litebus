@@ -34,12 +34,6 @@ class BetaEvent(Event):
 
 @final
 @dataclass(frozen=True, slots=True)
-class GammaEvent(Event):
-    tag: str
-
-
-@final
-@dataclass(frozen=True, slots=True)
 class CascadeEventA(Event):
     depth: int
 
@@ -291,41 +285,6 @@ class TestProvide:
         r1 = await provider()
         r2 = await provider()
         assert r1 == 1
-        assert r2 == 2
-        assert call_count == 2
-
-    async def test_use_cache(self) -> None:
-        """Provide with use_cache=True returns cached value on subsequent calls."""
-        call_count = 0
-
-        def factory() -> int:
-            nonlocal call_count
-            call_count += 1
-            return call_count
-
-        provider = Provide(factory, use_cache=True)
-        r1 = await provider()
-        r2 = await provider()
-        assert r1 == 1
-        assert r2 == 1
-        assert call_count == 1
-
-    async def test_use_cache_reset_on_aclose(self) -> None:
-        """Cache is cleared on aclose(), allowing re-resolution."""
-        call_count = 0
-
-        def factory() -> int:
-            nonlocal call_count
-            call_count += 1
-            return call_count
-
-        provider = Provide(factory, use_cache=True)
-        r1 = await provider()
-        assert r1 == 1
-
-        await provider.aclose()
-
-        r2 = await provider()
         assert r2 == 2
         assert call_count == 2
 
