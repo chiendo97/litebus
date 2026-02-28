@@ -1,13 +1,9 @@
 """Example: event listeners running as Prefect flows, tasks, and sub-flows.
 
-Two styles of wrapping are shown:
+Uses the ``wrappers`` parameter to integrate with Prefect:
 
-  1. wrappers parameter with lambda (for custom flow/task params):
-     @listener(OrderPlaced, wrappers=[lambda fn: flow(fn, name="...")])
-
-  2. Stacked decorators (@listener on outer, @flow/@task on inner):
-     @listener(OrderProcessed)
-     @task(name="send-confirmation")
+  @listener(OrderPlaced, wrappers=[flow])                          # simple
+  @listener(OrderPlaced, wrappers=[lambda fn: flow(fn, name=...)])  # with params
 
 Pipeline in the Prefect UI:
 
@@ -154,10 +150,10 @@ async def on_order_placed(
     bus.emit(OrderProcessed(item=event.item, qty=event.qty, txn_id=txn_id))
 
 
-# Stacked decorator syntax: @listener on outer, @task/@flow on inner.
-# Equivalent to wrappers=[lambda fn: task(fn, name="send-confirmation", ...)]
-@listener(OrderProcessed)
-@task(name="send-confirmation", log_prints=True)
+@listener(
+    OrderProcessed,
+    wrappers=[lambda fn: task(fn, name="send-confirmation", log_prints=True)],
+)
 async def on_order_processed(event: OrderProcessed) -> None:
     """Task: send order confirmation."""
     print(f"  confirmation sent: {event.item} x{event.qty} [{event.txn_id}]")
