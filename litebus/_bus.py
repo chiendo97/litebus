@@ -6,7 +6,7 @@ import typing
 from collections import defaultdict
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any, Self, final
+from typing import Self, final
 
 import anyio
 import anyio.abc
@@ -60,7 +60,7 @@ class EventBus:
         self,
         name: str,
         _resolving: frozenset[str] | None = None,
-    ):
+    ) -> object:
         """Recursively resolve a single dependency by name.
 
         Returns:
@@ -79,7 +79,7 @@ class EventBus:
 
         # resolve sub-dependencies of this provider
         sig = inspect.signature(provider.dependency)
-        sub_kwargs: dict[str, Any] = {}
+        sub_kwargs: dict[str, object] = {}
         for param_name in sig.parameters:
             if param_name in self._dependencies:
                 sub_kwargs[param_name] = await self._resolve(param_name, resolving)
@@ -90,7 +90,7 @@ class EventBus:
         self,
         fn: Callable[..., object],
         event: Event,
-    ) -> dict[str, Any]:
+    ) -> dict[str, object]:
         """Build the full kwargs dict for a listener call.
 
         Returns:
@@ -98,7 +98,7 @@ class EventBus:
         """
         sig = inspect.signature(fn)
         hints = typing.get_type_hints(fn)
-        kwargs: dict[str, Any] = {}
+        kwargs: dict[str, object] = {}
 
         for name in sig.parameters:
             annotation = hints.get(name)
