@@ -1,8 +1,8 @@
-# pyright: reportUnusedVariable=false, reportUnknownMemberType=false
 """Comprehensive test suite for litebus: EventListener, Provide, and EventBus."""
 
-from __future__ import annotations
+# pyright: reportUnusedParameter=false
 
+from collections.abc import AsyncGenerator, Callable, Generator
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import final
@@ -63,7 +63,7 @@ class NoListenerEvent(Event):
 class TestEventListener:
     """Tests for EventListener / listener decorator."""
 
-    def test_basic_decoration(self) -> None:
+    def test_decorator_stores_event_type_and_fn(self) -> None:
         """@listener(SomeEvent) returns an EventListener with correct event_types and fn."""
 
         @listener(AlphaEvent)
@@ -75,7 +75,7 @@ class TestEventListener:
         assert on_alpha.fn is not None
         assert on_alpha.fn.__name__ == "on_alpha"
 
-    def test_multiple_event_types(self) -> None:
+    def test_decorator_accepts_multiple_event_types(self) -> None:
         """@listener(EventA, EventB) stores both types in event_types."""
 
         @listener(AlphaEvent, BetaEvent)
@@ -85,23 +85,25 @@ class TestEventListener:
         assert isinstance(on_both, EventListener)
         assert set(on_both.event_types) == {AlphaEvent, BetaEvent}
 
-    def test_rejects_sync_function(self) -> None:
+    def test_decorator_rejects_sync_function(self) -> None:
         """@listener(Event) on a sync function raises TypeError."""
-        with pytest.raises(TypeError, match="must be an async function"):
+        el: EventListener[AlphaEvent] = EventListener(AlphaEvent)
 
-            @listener(AlphaEvent)
-            def on_sync(event: AlphaEvent) -> None:  # type: ignore[type-var]
-                pass
+        def sync_handler(event: AlphaEvent) -> None:
+            pass
+
+        with pytest.raises(TypeError, match="must be an async function"):
+            _ = el(sync_handler)  # pyright: ignore[reportArgumentType]
 
     def test_wrappers_applied_in_order(self) -> None:
-        """Wrappers are applied in order and executor differs from fn."""
+        """Wrappers are applied in the given order and produce an executor."""
         call_order: list[str] = []
 
-        def wrapper_a(fn: object) -> object:
+        def wrapper_a(fn: Callable[..., object]) -> Callable[..., object]:
             call_order.append("a")
             return fn
 
-        def wrapper_b(fn: object) -> object:
+        def wrapper_b(fn: Callable[..., object]) -> Callable[..., object]:
             call_order.append("b")
             return fn
 
@@ -114,19 +116,16 @@ class TestEventListener:
 
         assert result is decorated
         assert call_order == ["a", "b"]
-        # fn is the original, executor is the wrapped version
         assert decorated.fn is handler
-        # With identity wrappers, executor points to the same object,
-        # but the important thing is it went through the wrapper chain.
         assert decorated.executor is not None
 
-    def test_wrappers_executor_differs_from_fn(self) -> None:
-        """When wrappers transform the function, executor differs from fn."""
+    def test_wrappers_executor_differs_when_wrapper_replaces_fn(self) -> None:
+        """When a wrapper replaces the function, executor differs from fn."""
 
         async def replacement(event: AlphaEvent) -> None:
             pass
 
-        def replacing_wrapper(fn: object) -> object:
+        def replacing_wrapper(fn: Callable[..., object]) -> Callable[..., object]:
             return replacement
 
         decorated = EventListener(AlphaEvent, wrappers=[replacing_wrapper])
@@ -134,27 +133,28 @@ class TestEventListener:
         async def handler(event: AlphaEvent) -> None:
             pass
 
-        decorated(handler)
+        _ = decorated(handler)
 
         assert decorated.fn is handler
         assert decorated.executor is replacement
         assert decorated.fn is not decorated.executor
 
-    def test_hash_equality(self) -> None:
-        """Two listeners with same event_types and fn hash the same."""
+    def test_listeners_with_same_fn_and_types_hash_equal(self) -> None:
+        """Two listeners with same event_types and fn hash the same and are equal."""
 
         async def shared_fn(event: AlphaEvent) -> None:
             pass
 
         l1 = EventListener(AlphaEvent)
-        l1(shared_fn)
+        _ = l1(shared_fn)
 
         l2 = EventListener(AlphaEvent)
-        l2(shared_fn)
+        _ = l2(shared_fn)
 
         assert hash(l1) == hash(l2)
+        assert l1 == l2
 
-    def test_hash_inequality_different_fn(self) -> None:
+    def test_listeners_with_different_fn_hash_unequal(self) -> None:
         """Different fn produces different hashes."""
 
         async def fn_a(event: AlphaEvent) -> None:
@@ -164,26 +164,44 @@ class TestEventListener:
             pass
 
         l1 = EventListener(AlphaEvent)
-        l1(fn_a)
+        _ = l1(fn_a)
 
         l2 = EventListener(AlphaEvent)
-        l2(fn_b)
+        _ = l2(fn_b)
 
         assert hash(l1) != hash(l2)
+        assert l1 != l2
 
-    def test_hash_inequality_different_event_types(self) -> None:
+    def test_listeners_with_different_event_types_hash_unequal(self) -> None:
         """Different event_types produces different hashes."""
 
         async def shared_fn(event: Event) -> None:
             pass
 
         l1 = EventListener(AlphaEvent)
-        l1(shared_fn)
+        _ = l1(shared_fn)
 
         l2 = EventListener(BetaEvent)
-        l2(shared_fn)
+        _ = l2(shared_fn)
 
         assert hash(l1) != hash(l2)
+        assert l1 != l2
+
+    def test_equality_returns_not_implemented_for_non_listener(self) -> None:
+        """EventListener.__eq__ returns NotImplemented for non-EventListener."""
+
+        @listener(AlphaEvent)
+        async def on_alpha(event: AlphaEvent) -> None:
+            pass
+
+        assert on_alpha != "not a listener"
+        assert on_alpha != 42
+
+    def test_listener_without_fn_has_none_attributes(self) -> None:
+        """An EventListener that has not been used as a decorator has None fn/executor."""
+        el: EventListener[AlphaEvent] = EventListener(AlphaEvent)
+        assert el.fn is None
+        assert el.executor is None
 
 
 # ---------------------------------------------------------------------------
@@ -194,14 +212,14 @@ class TestEventListener:
 class TestProvide:
     """Tests for Provide (dependency injection container)."""
 
-    async def test_sync_factory(self) -> None:
+    async def test_sync_factory_returns_value(self) -> None:
         """Provide wrapping a sync callable returns its result."""
         provider = Provide(lambda: 42)
         async with AsyncExitStack() as stack:
             result = await provider(stack)
         assert result == 42
 
-    async def test_async_factory(self) -> None:
+    async def test_async_factory_returns_awaited_value(self) -> None:
         """Provide wrapping an async callable returns the awaited result."""
 
         async def async_factory() -> str:
@@ -212,11 +230,11 @@ class TestProvide:
             result = await provider(stack)
         assert result == "hello"
 
-    async def test_sync_generator_factory(self) -> None:
+    async def test_sync_generator_yields_and_cleans_up(self) -> None:
         """Sync generator yields value, cleans up when exit stack closes."""
         cleanup_called = False
 
-        def gen_factory():  # type: ignore[no-untyped-def]
+        def gen_factory() -> Generator[int, None, None]:
             nonlocal cleanup_called
             yield 99
             cleanup_called = True
@@ -228,11 +246,11 @@ class TestProvide:
             assert not cleanup_called
         assert cleanup_called
 
-    async def test_async_generator_factory(self) -> None:
+    async def test_async_generator_yields_and_cleans_up(self) -> None:
         """Async generator yields value, cleans up when exit stack closes."""
         cleanup_called = False
 
-        async def async_gen_factory():  # type: ignore[no-untyped-def]
+        async def async_gen_factory() -> AsyncGenerator[str, None]:
             nonlocal cleanup_called
             yield "async_value"
             cleanup_called = True
@@ -244,7 +262,7 @@ class TestProvide:
             assert not cleanup_called
         assert cleanup_called
 
-    async def test_sub_dependency_kwargs_passed(self) -> None:
+    async def test_kwargs_forwarded_to_factory(self) -> None:
         """Sub-dependency kwargs are passed through correctly."""
 
         def factory(x: int, y: str) -> str:
@@ -255,11 +273,11 @@ class TestProvide:
             result = await provider(stack, x=10, y="test")
         assert result == "10-test"
 
-    async def test_generator_cleanup_on_success(self) -> None:
-        """Generator runs post-yield code on clean exit."""
+    async def test_sync_generator_commits_on_clean_exit(self) -> None:
+        """Generator runs else/finally code on clean exit."""
         lifecycle: list[str] = []
 
-        def gen_factory():  # type: ignore[no-untyped-def]
+        def gen_factory() -> Generator[str, None, None]:
             lifecycle.append("entered")
             try:
                 yield "value"
@@ -276,11 +294,11 @@ class TestProvide:
             assert result == "value"
         assert lifecycle == ["entered", "commit", "closed"]
 
-    async def test_generator_cleanup_on_error(self) -> None:
+    async def test_sync_generator_rolls_back_on_error(self) -> None:
         """Generator sees exception, rolls back, and re-raises."""
         lifecycle: list[str] = []
 
-        def gen_factory():  # type: ignore[no-untyped-def]
+        def gen_factory() -> Generator[str, None, None]:
             lifecycle.append("entered")
             try:
                 yield "value"
@@ -298,7 +316,50 @@ class TestProvide:
                 raise RuntimeError(msg)
         assert lifecycle == ["entered", "rollback", "closed"]
 
-    async def test_multiple_calls_to_sync_factory(self) -> None:
+    async def test_async_generator_commits_on_clean_exit(self) -> None:
+        """Async generator runs else/finally code on clean exit."""
+        lifecycle: list[str] = []
+
+        async def async_gen_factory() -> AsyncGenerator[str, None]:
+            lifecycle.append("entered")
+            try:
+                yield "value"
+            except Exception:
+                lifecycle.append("rollback")
+            else:
+                lifecycle.append("commit")
+            finally:
+                lifecycle.append("closed")
+
+        provider = Provide(async_gen_factory)
+        async with AsyncExitStack() as stack:
+            result = await provider(stack)
+            assert result == "value"
+        assert lifecycle == ["entered", "commit", "closed"]
+
+    async def test_async_generator_rolls_back_on_error(self) -> None:
+        """Async generator sees exception and rolls back."""
+        lifecycle: list[str] = []
+
+        async def async_gen_factory() -> AsyncGenerator[str, None]:
+            lifecycle.append("entered")
+            try:
+                yield "value"
+            except Exception:
+                lifecycle.append("rollback")
+                raise
+            finally:
+                lifecycle.append("closed")
+
+        provider = Provide(async_gen_factory)
+        with pytest.raises(RuntimeError, match="boom"):
+            async with AsyncExitStack() as stack:
+                _ = await provider(stack)
+                msg = "boom"
+                raise RuntimeError(msg)
+        assert lifecycle == ["entered", "rollback", "closed"]
+
+    async def test_non_cached_factory_called_each_invocation(self) -> None:
         """Provide calls factory each time it is invoked."""
         call_count = 0
 
@@ -324,7 +385,9 @@ class TestProvide:
 class TestEventBus:
     """Tests for EventBus core functionality."""
 
-    async def test_basic_emit_and_receive(self) -> None:
+    # -- basic emit/receive --
+
+    async def test_listener_receives_emitted_event(self) -> None:
         """Listener receives event with correct payload after emit."""
         received: list[AlphaEvent] = []
 
@@ -339,7 +402,7 @@ class TestEventBus:
         assert len(received) == 1
         assert received[0].value == 42
 
-    async def test_multiple_listeners_same_event(self) -> None:
+    async def test_multiple_listeners_all_receive_same_event(self) -> None:
         """Multiple listeners for same event type all fire."""
         results: list[str] = []
 
@@ -357,7 +420,7 @@ class TestEventBus:
 
         assert sorted(results) == ["a", "b"]
 
-    async def test_listener_type_isolation(self) -> None:
+    async def test_listener_only_receives_matching_event_type(self) -> None:
         """Listener for type A does NOT fire for type B."""
         alpha_received: list[AlphaEvent] = []
         beta_received: list[BetaEvent] = []
@@ -378,7 +441,62 @@ class TestEventBus:
         assert len(beta_received) == 1
         assert beta_received[0].value == "only_beta"
 
-    async def test_di_resolution(self) -> None:
+    async def test_multi_event_listener_receives_all_registered_types(self) -> None:
+        """A listener registered for multiple event types receives both."""
+        received: list[Event] = []
+
+        @listener(AlphaEvent, BetaEvent)
+        async def on_both(event: Event) -> None:
+            received.append(event)
+
+        bus = EventBus(listeners=[on_both])
+        async with bus:
+            bus.emit(AlphaEvent(value=1))
+            bus.emit(BetaEvent(value="hi"))
+
+        assert len(received) == 2
+        types_received = {type(e) for e in received}
+        assert types_received == {AlphaEvent, BetaEvent}
+
+    async def test_base_event_listener_receives_subclass_events(self) -> None:
+        """Listener registered for base Event receives subclass events via MRO."""
+        received: list[Event] = []
+
+        @listener(Event)
+        async def on_any(event: Event) -> None:
+            received.append(event)
+
+        bus = EventBus(listeners=[on_any])
+        async with bus:
+            bus.emit(AlphaEvent(value=42))
+
+        assert len(received) == 1
+        assert isinstance(received[0], AlphaEvent)
+
+    async def test_multiple_sequential_emits_all_processed(self) -> None:
+        """Multiple events emitted in sequence are all processed."""
+        received: list[int] = []
+
+        @listener(AlphaEvent)
+        async def on_alpha(event: AlphaEvent) -> None:
+            received.append(event.value)
+
+        bus = EventBus(listeners=[on_alpha])
+        async with bus:
+            for i in range(5):
+                bus.emit(AlphaEvent(value=i))
+
+        assert sorted(received) == [0, 1, 2, 3, 4]
+
+    async def test_emit_with_no_matching_listeners_is_noop(self) -> None:
+        """Event with no listeners: no error, just a no-op."""
+        bus = EventBus(listeners=[])
+        async with bus:
+            bus.emit(NoListenerEvent())
+
+    # -- dependency injection --
+
+    async def test_listener_receives_injected_dependency(self) -> None:
         """Listener receives injected dependencies via EventBus DI."""
         received_value: list[int] = []
 
@@ -398,7 +516,7 @@ class TestEventBus:
 
         assert received_value == [123]
 
-    async def test_nested_di(self) -> None:
+    async def test_nested_dependency_resolution(self) -> None:
         """Dependency that depends on another dependency resolves correctly."""
         results: list[str] = []
 
@@ -424,17 +542,18 @@ class TestEventBus:
 
         assert results == ["base+derived"]
 
-    async def test_circular_dependency_raises(self) -> None:
-        """Circular dependency detection raises RuntimeError."""
+    async def test_circular_dependency_raises_runtime_error(self) -> None:
+        """Circular dependency detection raises RuntimeError during emit."""
 
-        def factory_a(b: object) -> str:
+        # Parameter names must match dependency keys for resolution to walk the cycle.
+        def factory_a(b: object) -> str:  # noqa: ARG005
             return "a"
 
-        def factory_b(a: object) -> str:
+        def factory_b(a: object) -> str:  # noqa: ARG005
             return "b"
 
         @listener(AlphaEvent)
-        async def on_alpha(event: AlphaEvent, a: str) -> None:
+        async def on_alpha(event: AlphaEvent, a: str) -> None:  # noqa: ARG005
             pass
 
         bus = EventBus(
@@ -444,11 +563,17 @@ class TestEventBus:
                 "b": Provide(factory_b),
             },
         )
-        async with bus, AsyncExitStack() as stack:
-            with pytest.raises(RuntimeError, match="Circular dependency"):
-                await bus._resolve("a", stack)
+        with pytest.raises(BaseExceptionGroup) as exc_info:
+            async with bus:
+                bus.emit(AlphaEvent(value=0))
 
-    async def test_eventbus_injection(self) -> None:
+        exceptions = exc_info.value.exceptions
+        assert any(
+            isinstance(e, RuntimeError) and "Circular dependency" in str(e)
+            for e in exceptions
+        )
+
+    async def test_eventbus_self_injection(self) -> None:
         """Listener with bus: EventBus parameter receives the bus instance."""
         received_bus: list[EventBus] = []
 
@@ -463,7 +588,9 @@ class TestEventBus:
         assert len(received_bus) == 1
         assert received_bus[0] is bus
 
-    async def test_cascading_events(self) -> None:
+    # -- cascading events --
+
+    async def test_cascading_emit_triggers_downstream_listeners(self) -> None:
         """Listener that calls bus.emit() triggers downstream listeners."""
         trace: list[str] = []
 
@@ -483,13 +610,14 @@ class TestEventBus:
         async with bus:
             bus.emit(CascadeEventA(depth=2))
 
-        # Expected cascade: a-2 -> b-1 -> a-0
         assert "a-2" in trace
         assert "b-1" in trace
         assert "a-0" in trace
         assert len(trace) == 3
 
-    async def test_emit_before_aenter_raises(self) -> None:
+    # -- error handling --
+
+    async def test_emit_before_context_entry_raises(self) -> None:
         """emit() before __aenter__() raises RuntimeError."""
 
         @listener(AlphaEvent)
@@ -500,30 +628,7 @@ class TestEventBus:
         with pytest.raises(RuntimeError, match="not started"):
             bus.emit(AlphaEvent(value=0))
 
-    async def test_generator_providers_cleaned_up(self) -> None:
-        """Generator-based providers are cleaned up on __aexit__()."""
-        cleanup_called = False
-
-        def gen_provider():  # type: ignore[no-untyped-def]
-            nonlocal cleanup_called
-            yield "resource"
-            cleanup_called = True
-
-        @listener(AlphaEvent)
-        async def on_alpha(event: AlphaEvent, resource: str) -> None:
-            pass
-
-        bus = EventBus(
-            listeners=[on_alpha],
-            dependencies={"resource": Provide(gen_provider)},
-        )
-        async with bus:
-            bus.emit(AlphaEvent(value=0))
-
-        # After __aexit__, generator cleanup should have run
-        assert cleanup_called
-
-    async def test_listener_exception_propagates(self) -> None:
+    async def test_listener_exception_propagates_as_exception_group(self) -> None:
         """Exception in listener propagates as ExceptionGroup."""
 
         @listener(ErrorEvent)
@@ -540,65 +645,35 @@ class TestEventBus:
         assert isinstance(exc_info.value.exceptions[0], ValueError)
         assert str(exc_info.value.exceptions[0]) == "intentional test error"
 
-    async def test_event_with_no_listeners(self) -> None:
-        """Event with no listeners: no error, just a no-op."""
-        bus = EventBus(listeners=[])
-        async with bus:
-            # Should not raise
-            bus.emit(NoListenerEvent())
+    # -- generator provider lifecycle --
 
-    async def test_multiple_events_emitted(self) -> None:
-        """Multiple events emitted in sequence are all processed."""
-        received: list[int] = []
+    async def test_generator_provider_cleaned_up_on_exit(self) -> None:
+        """Generator-based providers are cleaned up on __aexit__()."""
+        cleanup_called = False
+
+        def gen_provider() -> Generator[str, None, None]:
+            nonlocal cleanup_called
+            yield "resource"
+            cleanup_called = True
 
         @listener(AlphaEvent)
-        async def on_alpha(event: AlphaEvent) -> None:
-            received.append(event.value)
+        async def on_alpha(event: AlphaEvent, resource: str) -> None:  # noqa: ARG005
+            pass
 
-        bus = EventBus(listeners=[on_alpha])
+        bus = EventBus(
+            listeners=[on_alpha],
+            dependencies={"resource": Provide(gen_provider)},
+        )
         async with bus:
-            for i in range(5):
-                bus.emit(AlphaEvent(value=i))
+            bus.emit(AlphaEvent(value=0))
 
-        assert sorted(received) == [0, 1, 2, 3, 4]
-
-    async def test_multi_event_listener(self) -> None:
-        """A listener registered for multiple event types receives both."""
-        received: list[Event] = []
-
-        @listener(AlphaEvent, BetaEvent)
-        async def on_both(event: Event) -> None:
-            received.append(event)
-
-        bus = EventBus(listeners=[on_both])
-        async with bus:
-            bus.emit(AlphaEvent(value=1))
-            bus.emit(BetaEvent(value="hi"))
-
-        assert len(received) == 2
-        types_received = {type(e) for e in received}
-        assert types_received == {AlphaEvent, BetaEvent}
-
-    async def test_hierarchy_dispatch(self) -> None:
-        """Listener registered for base Event receives subclass events."""
-        received: list[Event] = []
-
-        @listener(Event)
-        async def on_any(event: Event) -> None:
-            received.append(event)
-
-        bus = EventBus(listeners=[on_any])
-        async with bus:
-            bus.emit(AlphaEvent(value=42))
-
-        assert len(received) == 1
-        assert isinstance(received[0], AlphaEvent)
+        assert cleanup_called
 
     async def test_generator_provider_rollback_on_listener_error(self) -> None:
         """Generator-based DI provider sees exception and can rollback."""
         lifecycle: list[str] = []
 
-        def get_session():  # type: ignore[no-untyped-def]
+        def get_session() -> Generator[str, None, None]:
             lifecycle.append("session:open")
             try:
                 yield "session"
@@ -611,7 +686,7 @@ class TestEventBus:
                 lifecycle.append("session:close")
 
         @listener(ErrorEvent)
-        async def on_error(event: ErrorEvent, session: str) -> None:
+        async def on_error(event: ErrorEvent, session: str) -> None:  # noqa: ARG005
             msg = "db write failed"
             raise RuntimeError(msg)
 
@@ -623,6 +698,50 @@ class TestEventBus:
             async with bus:
                 bus.emit(ErrorEvent())
 
-        # Generator provider should have been cleaned up
         assert "session:open" in lifecycle
         assert "session:close" in lifecycle
+
+    # -- max_concurrency --
+
+    async def test_max_concurrency_limits_parallel_listeners(self) -> None:
+        """max_concurrency limits how many listeners run in parallel."""
+        import anyio
+
+        max_concurrent = 0
+        current_concurrent = 0
+
+        @listener(AlphaEvent)
+        async def on_alpha(event: AlphaEvent) -> None:
+            nonlocal max_concurrent, current_concurrent
+            current_concurrent += 1
+            if current_concurrent > max_concurrent:
+                max_concurrent = current_concurrent
+            await anyio.sleep(0.01)
+            current_concurrent -= 1
+
+        bus = EventBus(listeners=[on_alpha], max_concurrency=2)
+        async with bus:
+            for i in range(6):
+                bus.emit(AlphaEvent(value=i))
+
+        assert max_concurrent <= 2
+
+    # -- bus reuse --
+
+    async def test_bus_can_be_used_as_context_manager_multiple_times(self) -> None:
+        """EventBus can be entered and exited multiple times."""
+        received: list[int] = []
+
+        @listener(AlphaEvent)
+        async def on_alpha(event: AlphaEvent) -> None:
+            received.append(event.value)
+
+        bus = EventBus(listeners=[on_alpha])
+
+        async with bus:
+            bus.emit(AlphaEvent(value=1))
+
+        async with bus:
+            bus.emit(AlphaEvent(value=2))
+
+        assert sorted(received) == [1, 2]

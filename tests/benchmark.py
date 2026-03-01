@@ -1,15 +1,15 @@
+# pyright: reportUnknownMemberType=false, reportUnusedParameter=false, reportUnusedFunction=false, reportUnknownVariableType=false
 """Benchmark suite for litebus using pytest-benchmark."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import Any
+from typing import final
 
 import anyio
 import pytest
 from pytest_benchmark.fixture import BenchmarkFixture
 
 from litebus import Event, EventBus, Provide, listener
+from litebus._types import Listener
 
 # ---------------------------------------------------------------------------
 # Event types
@@ -46,13 +46,15 @@ class FanOutEvent(Event):
 # ---------------------------------------------------------------------------
 
 
+@final
 class ServiceA:
     pass
 
 
+@final
 class ServiceB:
     def __init__(self, a: ServiceA) -> None:
-        self.a = a
+        self.a: ServiceA = a
 
 
 def get_service_a() -> ServiceA:
@@ -124,7 +126,7 @@ def test_simple(benchmark: BenchmarkFixture) -> None:
             for i in range(N):
                 bus.emit(SimpleEvent(value=i))
 
-    benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
+    _ = benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
 
 
 def test_di(benchmark: BenchmarkFixture) -> None:
@@ -142,12 +144,12 @@ def test_di(benchmark: BenchmarkFixture) -> None:
             for i in range(N):
                 bus.emit(DIEvent(value=i))
 
-    benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
+    _ = benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
 
 
 def test_fanout_10(benchmark: BenchmarkFixture) -> None:
     """Emit N events each handled by 10 listeners."""
-    listeners: list[Any] = []
+    listeners: list[Listener] = []
     for _ in range(10):
 
         @listener(FanOutEvent)
@@ -162,12 +164,12 @@ def test_fanout_10(benchmark: BenchmarkFixture) -> None:
             for i in range(N):
                 bus.emit(FanOutEvent(value=i))
 
-    benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
+    _ = benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
 
 
 def test_fanout_50(benchmark: BenchmarkFixture) -> None:
     """Emit N events each handled by 50 listeners."""
-    listeners: list[Any] = []
+    listeners: list[Listener] = []
     for _ in range(50):
 
         @listener(FanOutEvent)
@@ -182,7 +184,7 @@ def test_fanout_50(benchmark: BenchmarkFixture) -> None:
             for i in range(N):
                 bus.emit(FanOutEvent(value=i))
 
-    benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
+    _ = benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
 
 
 def test_cascade_100(benchmark: BenchmarkFixture) -> None:
@@ -193,7 +195,7 @@ def test_cascade_100(benchmark: BenchmarkFixture) -> None:
         async with bus:
             bus.emit(CascadeA(depth=100))
 
-    benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
+    _ = benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
 
 
 def test_cascade_1000(benchmark: BenchmarkFixture) -> None:
@@ -204,4 +206,4 @@ def test_cascade_1000(benchmark: BenchmarkFixture) -> None:
         async with bus:
             bus.emit(CascadeA(depth=1000))
 
-    benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)
+    _ = benchmark.pedantic(anyio.run, args=(run,), rounds=10, warmup_rounds=2)

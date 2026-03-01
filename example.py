@@ -1,11 +1,22 @@
-"""Usage example: typed event listeners with dependency injection."""
+"""Usage example: typed event listeners with dependency injection.
+
+Demonstrates:
+- Typed events extending Event base class
+- Dependency injection with sync, async, and generator factories
+- Generator DI lifecycle (setup/teardown per listener call)
+- Nested dependencies (AuditService depends on Database + Logger)
+- MRO-based hierarchy dispatch (base Event listener receives all events)
+- Cascading events (listener emits new events via self-injected EventBus)
+- Wrappers applied around listeners at execution time
+- Exception propagation via ExceptionGroup
+"""
 
 from __future__ import annotations
 
 import functools
 import logging
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from typing import cast, final
 
 import anyio
@@ -53,9 +64,21 @@ class Logger:
         print(f"  [LOG] {msg}")
 
 
-async def get_db():
+# Generator-based provider: setup before yield, teardown after.
+# If the listener raises, the generator receives the exception,
+# enabling rollback logic (try/except around yield).
+async def get_db() -> AsyncGenerator[Database]:
     db = Database()
-    yield db
+    print("  [DB] connection opened")
+    try:
+        yield db
+    except Exception:
+        print("  [DB] rolling back due to error")
+        raise
+    else:
+        print("  [DB] committed")
+    finally:
+        print("  [DB] connection closed")
 
 
 def get_logger() -> Logger:
@@ -126,6 +149,7 @@ async def on_audit(event: UserCreated, audit: AuditService) -> None:
 @listener(OrderPlaced, wrappers=[timed])
 async def on_order(event: OrderPlaced, logger: Logger, bus: EventBus) -> None:
     logger.info(f"order placed: {event.item} x{event.qty}")
+    # Cascading: emit a new event from within a listener
     bus.emit(OrderProcessed(item=event.item, qty=event.qty, status="confirmed"))
 
 
@@ -134,9 +158,11 @@ async def on_order_processed(event: OrderProcessed, logger: Logger) -> None:
     logger.info(f"order processed: {event.item} x{event.qty} [{event.status}]")
 
 
+# MRO-based hierarchy dispatch: registering for the base Event class
+# means this listener fires for ALL events (UserCreated, OrderPlaced, etc.)
 @listener(Event)
-async def on_error(event: Event, logger: Logger) -> None:
-    logger.info(f"error handling event: {event}")
+async def on_any_event(event: Event, logger: Logger) -> None:
+    logger.info(f"[catch-all] received event: {type(event).__name__}")
 
 
 # --- run ---
@@ -144,11 +170,17 @@ async def on_error(event: Event, logger: Logger) -> None:
 
 async def main() -> None:
     bus = EventBus(
-        listeners=[on_user_created, on_audit, on_order, on_order_processed],
+        listeners=[
+            on_user_created,
+            on_audit,
+            on_order,
+            on_order_processed,
+            on_any_event,  # hierarchy dispatch: fires for every event type
+        ],
         dependencies={
-            "db": Provide(get_db),
-            "logger": Provide(get_logger),
-            "audit": Provide(get_audit),  # depends on db + logger
+            "db": Provide(get_db),  # async generator (per-call lifecycle)
+            "logger": Provide(get_logger),  # sync factory
+            "audit": Provide(get_audit),  # async factory, depends on db + logger
         },
     )
 
@@ -160,6 +192,7 @@ async def main() -> None:
         bus.emit(OrderPlaced(item="Widget", qty=3))
 
     # all events are fully handled here (including cascaded OrderProcessed)
+    print("\n--- all events processed ---")
 
 
 anyio.run(main)

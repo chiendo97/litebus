@@ -1,7 +1,7 @@
 [project]
 name = "litebus"
 version = "0.1.0"
-description = "Standalone event bus with dependency injection"
+description = "Standalone async event bus with dependency injection for Python 3.12+, built on anyio"
 authors = [
     { name = "chiendo97", email = "chiendo97@gmail.com" }
 ]
