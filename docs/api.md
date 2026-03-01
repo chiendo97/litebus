@@ -1,88 +1,193 @@
 # API Reference
 
+## `Event`
+
+Base class that all events must extend. Events are typed payloads dispatched through the bus.
+
+```python
+from litebus import Event
+
+class UserCreated(Event):
+    def __init__(self, name: str, email: str) -> None:
+        self.name = name
+        self.email = email
+```
+
+Events can also use `@dataclass` for concise definitions:
+
+```python
+from dataclasses import dataclass
+
+@dataclass(frozen=True, slots=True)
+class OrderPlaced(Event):
+    item: str
+    qty: int
+```
+
+### MRO-Based Hierarchy
+
+Events form a class hierarchy. Listeners registered for a parent class receive all subclass events:
+
+```python
+@listener(Event)
+async def on_any(event: Event) -> None:
+    # receives UserCreated, OrderPlaced, and any other Event subclass
+    ...
+```
+
 ## `Provide`
 
-Wraps a callable as a named dependency provider.
+Wraps a callable as a dependency provider.
 
 ```python
 from litebus import Provide
 
-Provide(dependency, *, use_cache=False)
+Provide(dependency)
 ```
 
-### Parameters
+### Constructor
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `dependency` | `Callable[..., Any]` | required | Factory function (sync or async) that produces the dependency value |
-| `use_cache` | `bool` | `False` | Cache the resolved value after first invocation |
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `dependency` | `Callable[..., object]` | Factory function (sync, async, sync generator, or async generator) |
 
-### Behavior
+### Supported Factory Types
 
-- When invoked, calls the factory and returns the result
-- Supports both sync and async factories — async factories are awaited automatically
-- When `use_cache=True`, the factory is called once; subsequent invocations return the cached value
-- Factories can have parameters that reference other registered dependencies (resolved recursively by the bus)
-
-### Example
+**Sync function:**
 
 ```python
-class Database:
-    async def save(self, data: dict) -> None: ...
+def get_logger() -> Logger:
+    return Logger()
 
-async def get_db() -> Database:
-    return Database()
+Provide(get_logger)
+```
 
-db_provider = Provide(get_db, use_cache=True)
+**Async function:**
+
+```python
+async def get_audit(db: Database, logger: Logger) -> AuditService:
+    return AuditService(db, logger)
+
+Provide(get_audit)  # sub-dependencies (db, logger) resolved automatically
+```
+
+**Sync generator** (lifecycle-managed):
+
+```python
+def get_session() -> Generator[Session, None, None]:
+    session = Session()
+    try:
+        yield session
+    except Exception:
+        session.rollback()
+        raise
+    else:
+        session.commit()
+    finally:
+        session.close()
+
+Provide(get_session)
+```
+
+**Async generator** (lifecycle-managed):
+
+```python
+async def get_db() -> AsyncGenerator[Database]:
+    db = Database()
+    try:
+        yield db
+    except Exception:
+        db.rollback()
+        raise              # must re-raise after catching
+    else:
+        db.commit()
+    finally:
+        db.close()
+
+Provide(get_db)
+```
+
+### Generator Lifecycle
+
+Generator-based providers are entered on a per-call `AsyncExitStack`. The generator's lifecycle is scoped to a single listener call:
+
+- **On success:** the `else` block runs (e.g., commit)
+- **On error:** the `except` block runs (e.g., rollback). Must re-raise.
+- **Always:** the `finally` block runs (e.g., close connection)
+
+### Recursive Sub-Dependencies
+
+When a factory has parameters matching other registered dependency names, they are resolved automatically:
+
+```python
+bus = EventBus(
+    dependencies={
+        "db": Provide(get_db),
+        "logger": Provide(get_logger),
+        "audit": Provide(get_audit),  # needs db and logger -- resolved automatically
+    },
+)
 ```
 
 ## `EventListener` / `listener`
 
-Decorator that marks a callable as an event listener for one or more event IDs.
+Decorator that marks an async callable as a typed event listener.
 
 `listener` is a convenience alias for `EventListener`.
 
 ```python
 from litebus import listener  # or EventListener
 
-@listener("event_id")
-async def on_event(data: dict) -> None: ...
+@listener(UserCreated)
+async def on_user_created(event: UserCreated, db: Database) -> None:
+    await db.save({"name": event.name})
 ```
 
 ### Constructor
 
 ```python
-EventListener(*event_ids: str)
+EventListener(*event_types: type[T], wrappers: list[Wrapper] | None = None)
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `*event_ids` | `str` | One or more event ID strings this listener subscribes to |
+| `*event_types` | `type[T]` | One or more event classes this listener subscribes to |
+| `wrappers` | `list[Wrapper] \| None` | Optional callables applied around the listener at execution time |
 
 ### Behavior
 
-- Used as a two-phase decorator: `EventListener(*event_ids)(fn)`
-- The decorated function is stored on `listener.fn`
-- A listener can subscribe to multiple events:
+- Used as a two-phase decorator: `EventListener(*event_types)(fn)`
+- The decorated function **must be async** (`async def`). Sync functions raise `TypeError`.
+- The listener's parameter names and type annotations determine what gets injected (see [Parameter Resolution](#parameter-resolution))
+- Implements `__hash__` and `__eq__` based on `(event_types, fn)` for set storage
+
+### Multiple Event Types
+
+A single listener can subscribe to multiple event types:
 
 ```python
-@listener("user_created", "user_updated")
-async def on_user_change(data: dict) -> None: ...
+@listener(UserCreated, UserUpdated)
+async def on_user_change(event: UserCreated | UserUpdated) -> None:
+    ...
 ```
 
-- Listeners can be sync or async — the bus handles both
-- The listener's parameter names determine what gets injected (see [Dependency Resolution Rules](#dependency-resolution-rules))
+### Wrappers
 
-### Example
+Wrappers are callables applied around the listener at decoration time. They wrap the original function, which is stored as `fn`, while the wrapped version becomes `executor`:
 
 ```python
-@listener("order_placed")
-def on_order(data: dict, logger: Logger) -> None:
-    logger.info(f"order: {data}")
+def timed(fn):
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = await fn(*args, **kwargs)
+        print(f"{fn.__name__} took {time.perf_counter() - start:.4f}s")
+        return result
+    return wrapper
 
-@listener("user_created")
-async def on_user_created(data: dict, db: Database) -> None:
-    await db.save(data)
+@listener(OrderPlaced, wrappers=[timed])
+async def on_order(event: OrderPlaced) -> None:
+    ...
 ```
 
 ## `EventBus`
@@ -92,25 +197,26 @@ Core event dispatcher. Connects listeners to events and resolves dependencies wh
 ```python
 from litebus import EventBus
 
-bus = EventBus(listeners=..., dependencies=...)
-
-async with bus:
-    bus.emit("event_id", key=value)
+async with EventBus(listeners=..., dependencies=...) as bus:
+    bus.emit(event)
 ```
 
 ### Constructor
 
 ```python
 EventBus(
-    listeners: list[EventListener] | None = None,
+    listeners: Sequence[Listener] | None = None,
     dependencies: dict[str, Provide] | None = None,
+    *,
+    max_concurrency: int | None = None,
 )
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `listeners` | `list[EventListener] \| None` | `None` | Event listeners to register |
+| `listeners` | `Sequence[Listener] \| None` | `None` | Event listeners to register |
 | `dependencies` | `dict[str, Provide] \| None` | `None` | Named dependency providers |
+| `max_concurrency` | `int \| None` | `None` | Maximum concurrent listener calls (keyword-only) |
 
 ### Async Context Manager
 
@@ -118,74 +224,100 @@ The bus **must** be entered as an async context manager before emitting events:
 
 ```python
 async with bus:
-    # bus is active, emit() works here
-    bus.emit("my_event", data={"key": "value"})
-# bus is shut down, streams closed, tasks awaited
+    bus.emit(UserCreated(name="Alice", email="alice@example.com"))
+# all listeners have completed (or raised) at this point
 ```
 
 On entry (`__aenter__`):
-- Opens a memory stream for event dispatch
-- Starts a background worker task that processes queued events
+- Creates an anyio `TaskGroup` for concurrent listener execution
 
 On exit (`__aexit__`):
-- Closes the stream, causing the worker to drain remaining events
-- Awaits all in-flight listener tasks
+- Awaits all in-flight listener tasks via the `TaskGroup`
+- If any listener raised, exceptions surface as `BaseExceptionGroup`
 
-### `emit(event_id, **kwargs)`
+The bus can be entered multiple times (reusable context manager).
 
-Fire-and-forget event emission.
+### `emit(event)`
+
+Fire-and-forget typed event emission.
 
 ```python
-bus.emit(event_id: str, **kwargs: Any) -> None
+bus.emit(event: Event) -> None
 ```
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `event_id` | `str` | The event identifier to emit |
-| `**kwargs` | `Any` | Keyword arguments passed to matching listeners |
+| `event` | `Event` | A typed event instance |
 
 **Behavior:**
 
-- **Synchronous** — does not `await`, returns immediately
-- Queues events onto an internal stream for async processing
+- **Synchronous** -- does not `await`, returns immediately
+- Walks the event's MRO to find all matching listeners (hierarchy dispatch)
+- Schedules each matching listener via `task_group.start_soon()`
 - Raises `RuntimeError` if called outside the `async with bus:` block
-- If no listeners are registered for the event ID, the call is a no-op
+- If no listeners match, the call is a no-op
 
-### Example
+### Error Handling
+
+Listener exceptions propagate via anyio `ExceptionGroup`. They are **not** caught or logged silently:
 
 ```python
-async def main() -> None:
-    bus = EventBus(
-        listeners=[on_user_created, on_audit, on_order],
-        dependencies={
-            "db": Provide(get_db),
-            "logger": Provide(get_logger),
-            "audit": Provide(get_audit),
-        },
-    )
-
+try:
     async with bus:
-        bus.emit("user_created", data={"name": "Alice"})
-        bus.emit("order_placed", data={"item": "Widget", "qty": 3})
-        await anyio.sleep(0.1)  # allow listeners to execute
+        bus.emit(event)
+except* ValueError as eg:
+    # handle ValueError from listeners
+    ...
 ```
 
-## Dependency Resolution Rules
+### Concurrency Control
 
-When a listener is invoked, the bus builds its keyword arguments by inspecting the function signature. Each parameter is resolved using the following priority:
-
-### 1. Emit kwargs take priority
-
-Values passed directly to `emit()` are used first:
+Use `max_concurrency` to limit how many listeners execute simultaneously:
 
 ```python
-bus.emit("user_created", data={"name": "Alice"})
-# "data" parameter in any matching listener receives {"name": "Alice"}
+bus = EventBus(listeners=[...], max_concurrency=10)
 ```
 
-### 2. Registered dependencies
+This uses anyio's `CapacityLimiter` under the hood.
 
-If a parameter name matches a key in the `dependencies` dict (and was not provided via emit kwargs), the corresponding `Provide` instance is invoked:
+### Self-Injection
+
+Listeners can request the bus itself to emit cascading events:
+
+```python
+@listener(OrderPlaced)
+async def on_order(event: OrderPlaced, bus: EventBus) -> None:
+    # cascading: emit a new event from within a listener
+    bus.emit(OrderProcessed(item=event.item, status="confirmed"))
+```
+
+## Parameter Resolution
+
+When a listener is invoked, the bus builds its keyword arguments by inspecting the function signature. Each parameter is resolved in this order:
+
+### 1. EventBus self-injection
+
+If a parameter's type annotation is `EventBus`, the bus injects itself:
+
+```python
+@listener(MyEvent)
+async def handler(event: MyEvent, bus: EventBus) -> None:
+    bus.emit(AnotherEvent())  # cascading
+```
+
+### 2. Event matching
+
+If a parameter's type annotation matches the emitted event (via `isinstance`), the event is injected:
+
+```python
+@listener(UserCreated)
+async def handler(event: UserCreated) -> None:
+    print(event.name)
+```
+
+### 3. Registered dependencies
+
+If a parameter name matches a key in the `dependencies` dict, the corresponding `Provide` is invoked:
 
 ```python
 bus = EventBus(
@@ -193,15 +325,15 @@ bus = EventBus(
     ...
 )
 
-@listener("my_event")
-async def handler(db: Database) -> None:
+@listener(MyEvent)
+async def handler(event: MyEvent, db: Database) -> None:
     # "db" resolved from Provide(get_db)
     ...
 ```
 
-### 3. Recursive sub-dependency resolution
+### 4. Recursive sub-dependencies
 
-When a dependency's factory has parameters that match other registered dependency names, those are resolved recursively:
+When a dependency's factory has parameters matching other registered dependency names, those are resolved recursively:
 
 ```python
 async def get_audit(db: Database, logger: Logger) -> AuditService:
@@ -213,29 +345,68 @@ bus = EventBus(
         "logger": Provide(get_logger),
         "audit": Provide(get_audit),  # db and logger resolved automatically
     },
-    ...
 )
 ```
 
-### 4. Circular dependency detection
+### 5. Circular dependency detection
 
-If dependency A requires B and B requires A, the bus raises a `RuntimeError` at resolution time:
+If dependency A requires B and B requires A, the bus raises `RuntimeError` at resolution time:
 
-```python
+```
 RuntimeError("Circular dependency: a -> b -> a")
 ```
 
-The detection tracks the full resolution path and reports it in the error message.
+### 6. Unmatched parameters
 
-### 5. Unmatched parameters
-
-Parameters that don't match emit kwargs or any registered dependency are skipped. The function must provide defaults for these, or a `TypeError` will occur at call time.
+Parameters that don't match any of the above are skipped. The function must provide defaults for these, or a `TypeError` will occur at call time.
 
 ### Resolution Summary
 
 ```
 For each parameter in listener signature:
-  1. emit kwargs?        → use value from emit()
-  2. registered dep?     → resolve via Provide (recursive)
-  3. neither?            → skip (must have default)
+  1. annotation is EventBus?  -> inject self (bus)
+  2. annotation matches event? -> inject event
+  3. name in dependencies?     -> resolve via Provide (recursive)
+  4. none of the above?        -> skip (must have default)
+```
+
+## Complete Example
+
+```python
+import anyio
+from collections.abc import AsyncGenerator
+from litebus import Event, EventBus, Provide, listener
+
+class UserCreated(Event):
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+class Database:
+    async def save(self, data: dict) -> None: ...
+
+async def get_db() -> AsyncGenerator[Database]:
+    db = Database()
+    try:
+        yield db
+    except Exception:
+        print("rollback")
+        raise
+    else:
+        print("commit")
+    finally:
+        print("closed")
+
+@listener(UserCreated)
+async def on_user(event: UserCreated, db: Database) -> None:
+    await db.save({"name": event.name})
+
+async def main() -> None:
+    bus = EventBus(
+        listeners=[on_user],
+        dependencies={"db": Provide(get_db)},
+    )
+    async with bus:
+        bus.emit(UserCreated(name="Alice"))
+
+anyio.run(main)
 ```
